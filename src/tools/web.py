@@ -12,6 +12,8 @@ from tools.fs import _get_safe_path, _get_workspace_type, _get_workspace_dir, _I
 
 _ddgs_lock = threading.Lock()
 _ddgs_client = None
+_consecutive_search_failures = 0
+_backoff_lock = asyncio.Lock()
 
 def get_ddgs_client():
     """Thread-safe lazy initialization of the DDGS client."""
@@ -194,10 +196,26 @@ async def web_search(
 
         return f"🔍 Found {len(result_texts)} result(s) for '{query}':\n\n{chr(10).join(result_texts)}"
         
-    try:
-        return await asyncio.wait_for(asyncio.to_thread(_do_search), timeout=45)
-    except asyncio.TimeoutError:
-        return "Search failed: timed out after 45 seconds. Try again or rephrase the query."
-    except Exception as e:
-        import traceback
-        return f"Search failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+    global _consecutive_search_failures
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        try:
+            result = await asyncio.wait_for(asyncio.to_thread(_do_search), timeout=45)
+            _consecutive_search_failures = 0
+            return result
+        except asyncio.TimeoutError:
+            return "Search failed: timed out after 45 seconds. Try again or rephrase the query."
+        except Exception as e:
+            _consecutive_search_failures += 1
+            if _consecutive_search_failures >= 6:
+                return ("SEARCH SERVICE UNAVAILABLE: the web search provider has returned errors "
+                        "repeatedly despite waiting between attempts, and is likely rate-limiting "
+                        "this machine for an extended period. Do NOT retry or reword this search. "
+                        "Report to your caller that web search is currently unavailable and return "
+                        "any findings you already have.")
+            if attempt < max_attempts - 1:
+                wait = 30 * (2 ** attempt)   # 30s, then 60s
+                async with _backoff_lock:
+                    await asyncio.sleep(wait)
+            else:
+                return f"Search failed: {str(e)}"
