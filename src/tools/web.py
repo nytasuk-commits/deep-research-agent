@@ -1,3 +1,5 @@
+import truststore
+truststore.inject_into_ssl()
 import httpx
 import os
 import re
@@ -17,7 +19,7 @@ def get_ddgs_client():
     with _ddgs_lock:
         if _ddgs_client is None:
             from ddgs import DDGS
-            _ddgs_client = DDGS()
+            _ddgs_client = DDGS(timeout=20)
             # Pre-warm the internal engine cache to prevent PyO3 deadlocks 
             # when multiple threads initialize primp.Client concurrently later.
             _ddgs_client._get_engines("text", "auto")
@@ -193,7 +195,9 @@ async def web_search(
         return f"🔍 Found {len(result_texts)} result(s) for '{query}':\n\n{chr(10).join(result_texts)}"
         
     try:
-        return await asyncio.to_thread(_do_search)
+        return await asyncio.wait_for(asyncio.to_thread(_do_search), timeout=45)
+    except asyncio.TimeoutError:
+        return "Search failed: timed out after 45 seconds. Try again or rephrase the query."
     except Exception as e:
         import traceback
         return f"Search failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
