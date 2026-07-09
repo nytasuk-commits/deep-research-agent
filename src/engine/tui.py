@@ -1232,8 +1232,6 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
                                 "call_id": call_id, "result": str(result)
                             })
                             # Detect the draft report being written -> demand review immediately
-                            if not enforced_review_check and "final_report.md" in str(result):
-                                report_just_written = True
 
     session_data = None
     if session_id:
@@ -1350,6 +1348,8 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
                             log_stream_content("Agent", "function_result", {
                                 "call_id": call_id, "result": str(result)
                             })
+                            if not enforced_review_check and "final_report.md" in str(result):
+                                report_just_written = True
                 if getattr(update, "user_input_requests", None):
                     user_input_requests.extend(update.user_input_requests)
             except BaseException as e:
