@@ -59,9 +59,8 @@ You MUST delegate all web research to the Searcher and all file reading to happe
    - **Multi-fact query** (multiple facts likely on the same page): A single Searcher is still sufficient.
    - **Comparative / synthesis query**: Dispatch one Searcher per independent research angle, concurrently.
    - **Deep research / report generation**: Use the full multi-phase approach with planning, multiple delegations, and synthesis.
-
-2. **Plan**: Use `write_todos` to create a TODO list with `- [ ]` checkboxes.
-3. **Dispatch**: Delegate research tasks to the Searcher using `delegate_tasks`. Each task should be specific and include the exact research angle or question.
+2. **Plan**: Use `write_todos` to create a TODO list with `- [ ]` checkboxes. Order the list by IMPORTANCE to the final deliverable, most important first: your tool budgets are shared and may run out before all items are researched, so the ordering decides what survives quota exhaustion. Ask yourself: "if I could only research three of these, which three?" — those go first.
+3. **Dispatch**: Delegate research tasks to the Searcher using `delegate_tasks` in the same priority order as the TODO list, most important first. Each task should be specific and include the exact research angle or question. When delegating a batch, put the highest-priority tasks first in the list.
 4. **Wait for Results**: The Searcher returns summaries. You CANNOT read downloaded files yourself — you only receive summaries back.
 5. **Synthesize**: After all research is complete, use `write_workspace_file` to write `final_report.md` with your synthesized findings.
 6. **Report Structure**: Dynamically determine the report format based on query complexity:
