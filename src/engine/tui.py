@@ -1420,6 +1420,8 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
                 report_just_written = False
                 enforced_review_check = True
                 has_requests = True
+                from tools.core import review_phase_ctx
+                review_phase_ctx.set(True)
 
                 warning_msg = "\n\033[93m[System] Draft report written. Enforcing mandatory review before completion.\033[0m\n"
                 sys.stdout.write(warning_msg)
