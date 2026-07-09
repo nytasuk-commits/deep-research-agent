@@ -1226,11 +1226,14 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
                 if call_id:
                     sys.stdout.write(f"\n\033[93m[{agent_name}] Calling {name}...\033[0m\n")
             elif content.type == "function_result":
-                call_id = getattr(content, "call_id", None)
-                result = getattr(content, "result", "")
-                log_stream_content(agent_name, "function_result", {
-                    "call_id": call_id, "result": str(result)
-                })
+                            call_id = getattr(content, "call_id", None)
+                            result = getattr(content, "result", "")
+                            log_stream_content("Agent", "function_result", {
+                                "call_id": call_id, "result": str(result)
+                            })
+                            # Detect the draft report being written -> demand review immediately
+                            if not enforced_review_check and "final_report.md" in str(result):
+                                report_just_written = True
 
     session_data = None
     if session_id:
@@ -1318,6 +1321,7 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
         has_requests = True
         enforced_artifact_check = False
         enforced_review_check = False
+        report_just_written = False
         
         while has_requests:
             has_requests = False
@@ -1412,28 +1416,23 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
                     except Exception as e:
                         pass
 
-            if not has_requests and not enforced_review_check:
-                review_done = any(
-                    ev.get("type") == "function_call"
-                    and ev.get("data", {}).get("name") == "delegate_tasks"
-                    and "Reviewer" in (ev.get("data", {}).get("arguments") or "")
-                    for ev in _session_events
-                )
-                if not review_done:
-                    has_requests = True
-                    enforced_review_check = True
+            if report_just_written and not enforced_review_check:
+                report_just_written = False
+                enforced_review_check = True
+                has_requests = True
 
-                    warning_msg = "\n\033[91m[System] WARNING: The report was not reviewed. Pushing agent to delegate review.\033[0m\n"
-                    sys.stdout.write(warning_msg)
+                warning_msg = "\n\033[93m[System] Draft report written. Enforcing mandatory review before completion.\033[0m\n"
+                sys.stdout.write(warning_msg)
 
-                    inject_msg = ("SYSTEM WARNING: You are attempting to finish, but you have not delegated review of "
-                                  "'final_report.md' to the Reviewer sub-agent, which is a mandatory step. You MUST now call "
-                                  "delegate_tasks with agent_id 'Reviewer' and instructions to review the file 'final_report.md'. "
-                                  "Then fix any violations it reports by rewriting final_report.md.")
+                inject_msg = ("SYSTEM: You have just written final_report.md. Do NOT summarize or present results to the user yet. "
+                              "You MUST now: 1) call delegate_tasks with agent_id 'Reviewer' and instructions to review the file "
+                              "'final_report.md'; 2) fix every violation it reports by rewriting final_report.md (fix by removing or "
+                              "marking claims as unverified, never by inventing data); 3) only then present your final summary, which "
+                              "must reflect the REVIEWED report.")
 
-                    new_inputs = [current_input] if isinstance(current_input, str) else list(current_input)
-                    new_inputs.append(Message("user", [{"type": "text", "text": inject_msg}]))
-                    current_input = new_inputs
+                new_inputs = [current_input] if isinstance(current_input, str) else list(current_input)
+                new_inputs.append(Message("user", [{"type": "text", "text": inject_msg}]))
+                current_input = new_inputs
 
                 
         _write_log()
