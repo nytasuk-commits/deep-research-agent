@@ -1317,6 +1317,7 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
         current_input = prompt
         has_requests = True
         enforced_artifact_check = False
+        enforced_review_check = False
         
         while has_requests:
             has_requests = False
@@ -1387,6 +1388,53 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
                             current_input = new_inputs
                     except Exception as e:
                         pass
+
+            if not has_requests and not enforced_artifact_check:
+                req_artifact = config.cfg.get("settings", {}).get("workspace", {}).get("required_artifact", None)
+                if req_artifact:
+                    from tools.fs import get_workspace_files
+                    try:
+                        # get_workspace_files returns a list of filenames
+                        files = get_workspace_files()
+                        if req_artifact not in files:
+                            has_requests = True
+                            enforced_artifact_check = True
+                            
+                            warning_msg = f"\n\033[91m[System] WARNING: Required artifact '{req_artifact}' is missing from the workspace. Pushing agent to create it.\033[0m\n"
+                            sys.stdout.write(warning_msg)
+                            log_stream_content("Agent", "text", {"text": warning_msg})
+                            
+                            inject_msg = f"SYSTEM WARNING: You are attempting to finish the task, but the required final artifact '{req_artifact}' is missing from the workspace. You MUST create this file to successfully complete the task."
+                            
+                            new_inputs = [current_input] if isinstance(current_input, str) else list(current_input)
+                            new_inputs.append(Message("user", [{"type": "text", "text": inject_msg}]))
+                            current_input = new_inputs
+                    except Exception as e:
+                        pass
+
+            if not has_requests and not enforced_review_check:
+                review_done = any(
+                    ev.get("type") == "function_call"
+                    and ev.get("data", {}).get("name") == "delegate_tasks"
+                    and "Reviewer" in (ev.get("data", {}).get("arguments") or "")
+                    for ev in _session_events
+                )
+                if not review_done:
+                    has_requests = True
+                    enforced_review_check = True
+
+                    warning_msg = "\n\033[91m[System] WARNING: The report was not reviewed. Pushing agent to delegate review.\033[0m\n"
+                    sys.stdout.write(warning_msg)
+
+                    inject_msg = ("SYSTEM WARNING: You are attempting to finish, but you have not delegated review of "
+                                  "'final_report.md' to the Reviewer sub-agent, which is a mandatory step. You MUST now call "
+                                  "delegate_tasks with agent_id 'Reviewer' and instructions to review the file 'final_report.md'. "
+                                  "Then fix any violations it reports by rewriting final_report.md.")
+
+                    new_inputs = [current_input] if isinstance(current_input, str) else list(current_input)
+                    new_inputs.append(Message("user", [{"type": "text", "text": inject_msg}]))
+                    current_input = new_inputs
+
                 
         _write_log()
         elapsed = datetime.now() - start_time
