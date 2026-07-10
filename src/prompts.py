@@ -163,6 +163,7 @@ For TIME-SENSITIVE facts:
 - Prefer the primary source (the organisation the fact is about: vendor, venue, official body) over articles that merely mention it. A mention in a news article or review is a LEAD, not evidence — fetch the primary source to confirm.
 - For PRODUCT PRICING specifically: always attempt the manufacturer's own online store FIRST (e.g. the brand's own .com or .co.uk site), because it lists all configurations. Marketplace listings (Amazon, eBay) show only single configurations and may not be the one needed. If the task requires a specific configuration, find the price for THAT configuration and state which configuration each found price belongs to.
 - NEVER report a figure or claim taken only from a search result snippet. Fetch the page first.
+- SOURCE SELECTION: Prefer sites that yield content to automated fetching: vendor/official pages, government sites, news outlets, community forums, technical blogs, Wikipedia. AVOID selecting URLs from social media (Facebook, Instagram, X/Twitter, LinkedIn, TikTok), academic gateways (ResearchGate, Academia.edu), or login-walled services — these ALWAYS fail to fetch. If a search result from such a site looks valuable, search for the same information republished elsewhere instead.
 - Record every time-sensitive claim together with its source URL and the publication or update date of the page, if visible.
 - Compare source dates against today's date. If a source is more than 3 months old, treat its time-sensitive claims as potentially STALE and label them as such in your findings.
 

@@ -32,6 +32,15 @@ def get_ddgs_client():
 @with_quota
 async def fetch_url_to_workspace(url: str, filename: str, convert_to_md: bool = True) -> str:
     """Fetch external web content and save it directly to the workspace. If convert_to_md is True, parses to Markdown."""
+    import config as app_config
+    _blocked = app_config.cfg.get("settings", {}).get("blocked_fetch_domains", []) or []
+    _host = re.sub(r"^https?://(www\.)?", "", url.lower()).split("/")[0]
+    for _dom in _blocked:
+        if _host == _dom.lower() or _host.endswith("." + _dom.lower()) or url.lower().find(_dom.lower()) != -1 and "/" in _dom:
+            return (f"BLOCKED DOMAIN: {_dom} is on the known-hostile list (login walls / bot protection / "
+                    f"no scrapable content). Nothing was fetched. Do NOT retry this website — find the same "
+                    f"information from a different source.")
+
     def _fetch():
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
         resp = httpx.get(url, headers=headers, timeout=30, follow_redirects=True)
@@ -99,7 +108,24 @@ async def fetch_url_to_workspace(url: str, filename: str, convert_to_md: bool = 
         
     try:
         data = await asyncio.to_thread(_fetch)
-        
+
+        # Detect bot-challenge / block / error pages before saving junk to the workspace
+        if isinstance(data, str) and len(data) < 20000:
+            _block_markers = (
+                "Just a moment", "Enable JavaScript and cookies", "Ray ID:",
+                "Checking your browser", "Verifying you are human",
+                "Complete the security check", "DDoS protection by",
+                "Please enable Cookies and reload",
+                "Access denied", "You do not have access to",
+                "Error 403 Forbidden", "Error 1020",
+                "Sorry, something went wrong.",
+                "local_rate_limited", "local\\_rate\\_limited",
+            )
+            if any(m in data for m in _block_markers):
+                return (f"BLOCKED: {url} returned a bot-challenge, access-denied, or error page instead of "
+                        f"content. Nothing was saved. Do NOT retry this URL or this website — find the same "
+                        f"information from a different source.")
+
         # Explicitly tag markdown files
         if convert_to_md and not filename.endswith('.md'):
             filename += '.md'
