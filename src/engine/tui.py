@@ -965,6 +965,7 @@ class BasicTuiAgent(App):
         agent, session = create_local_agent(builder=self.builder, subagent_callback=ui_callback)
         current_input = query
         has_requests = True
+        enforced_review_check = False
         state = {"calls": {}, "current_call_id": None, "current_msg": None}
         
         while has_requests:
@@ -1069,7 +1070,34 @@ class BasicTuiAgent(App):
                 
                 # Push back upstream and flush state 
                 current_input = new_inputs
-                
+
+            if not has_requests and not enforced_review_check:
+                try:
+                    from tools.fs import get_workspace_files
+                    report_exists = "final_report.md" in get_workspace_files()
+                except Exception:
+                    report_exists = False
+                review_done = any(
+                    ev.get("type") == "function_call"
+                    and ev.get("data", {}).get("name") == "delegate_tasks"
+                    and "Reviewer" in (ev.get("data", {}).get("arguments") or "")
+                    for ev in _session_events
+                )
+                if report_exists and not review_done:
+                    enforced_review_check = True
+                    has_requests = True
+                    from tools.core import review_phase_ctx
+                    review_phase_ctx.set(True)
+                    chat.mount(Static("[yellow]\\[System] Draft report written. Enforcing mandatory review before completion.[/yellow]", classes="agent-bubble"))
+                    self._safe_scroll_end(chat)
+                    inject_msg = ("SYSTEM: You have written final_report.md but it has not been reviewed. Do NOT present results as final. "
+                                  "You MUST now: 1) call delegate_tasks with agent_id 'Reviewer' and instructions to review the file "
+                                  "'final_report.md'; 2) fix every violation it reports by rewriting final_report.md (fix by removing or "
+                                  "marking claims as unverified, never by inventing data); 3) then present your final summary reflecting the REVIEWED report.")
+                    new_inputs = [current_input] if isinstance(current_input, str) else list(current_input)
+                    new_inputs.append(Message("user", [{"type": "text", "text": inject_msg}]))
+                    current_input = new_inputs
+
         tool_quotas_ctx.reset(token)
         self._is_agent_running = False
 
