@@ -67,7 +67,8 @@ def _build_client():
     return OpenAIChatCompletionClient(
         base_url=config.cfg["api"]["openai_base_url"],
         api_key=os.getenv("OPENAI_API_KEY", "dummy"),
-        model=config.cfg["api"]["openai_model"]
+        model=config.cfg["api"]["openai_model"],
+        timeout=1800.0
     )
 
 def create_local_agent(builder, subagent_callback=None, session_data=None):
