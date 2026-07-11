@@ -64,11 +64,15 @@ def _get_default_options():
     return options
 
 def _build_client():
-    return OpenAIChatCompletionClient(
+    from openai import AsyncOpenAI
+    _async_client = AsyncOpenAI(
         base_url=config.cfg["api"]["openai_base_url"],
         api_key=os.getenv("OPENAI_API_KEY", "dummy"),
-        model=config.cfg["api"]["openai_model"],
         timeout=1800.0
+    )
+    return OpenAIChatCompletionClient(
+        model=config.cfg["api"]["openai_model"],
+        async_client=_async_client
     )
 
 def create_local_agent(builder, subagent_callback=None, session_data=None):
