@@ -42,8 +42,15 @@ async def fetch_url_to_workspace(url: str, filename: str, convert_to_md: bool = 
                     f"information from a different source.")
 
     def _fetch():
+        import time
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
+        _backoffs = [30, 60, 240]
         resp = httpx.get(url, headers=headers, timeout=30, follow_redirects=True)
+        for _wait in _backoffs:
+            if resp.status_code != 429:
+                break
+            time.sleep(_wait)
+            resp = httpx.get(url, headers=headers, timeout=30, follow_redirects=True)
 
         if not convert_to_md:
             return resp.content  # Raw bytes
@@ -121,6 +128,7 @@ async def fetch_url_to_workspace(url: str, filename: str, convert_to_md: bool = 
                 "Sorry, something went wrong.",
                 "local_rate_limited", "local\\_rate\\_limited",
                 "Click the button below to continue shopping",
+                "We had to rate limit your IP", "Too Many Requests",
             )
             if any(m in data for m in _block_markers):
                 return (f"BLOCKED: {url} returned a bot-challenge, access-denied, or error page instead of "
@@ -153,10 +161,14 @@ async def fetch_url_to_workspace(url: str, filename: str, convert_to_md: bool = 
             else:
                 with open(path, mode) as f:
                     f.write(chunk)
-            return f"Fetched URL successfully to '{filename}' on disk."
+            return (f"SUCCESS. SAVED_FILENAME={filename}\n"
+                    f"When you delegate this file to the Analyzer you MUST pass exactly this filename: {filename}\n"
+                    f"Do NOT invent, shorten, or rename it. Copy it character-for-character.")
         else:
             _IN_MEMORY_FS[path] = chunk
-            return f"Fetched URL successfully to '{filename}' in memory."
+            return (f"SUCCESS. SAVED_FILENAME={filename}\n"
+                    f"When you delegate this file to the Analyzer you MUST pass exactly this filename: {filename}\n"
+                    f"Do NOT invent, shorten, or rename it. Copy it character-for-character.")
     except Exception as e:
         import traceback
         return f"Failed: {e}\n\nTraceback:\n{traceback.format_exc()}"
