@@ -28,7 +28,7 @@ def check_quota(tool_name: str) -> str | None:
                 )
         if ctx[tool_name]["used"] >= ctx[tool_name]["limit"]:
             ctx[tool_name]["used"] += 1
-            if ctx[tool_name]["used"] > ctx[tool_name]["limit"] + 3:
+            if ctx[tool_name]["used"] > ctx[tool_name]["limit"] + 10:
                 raise QuotaAbortException(f"Agent trapped in loop. Quota exceeded multiple times for {tool_name}.")
             return (
                 f"Error: Quota reached. You have used the '{tool_name}' tool "
