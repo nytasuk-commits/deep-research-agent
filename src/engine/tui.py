@@ -721,6 +721,11 @@ class BasicTuiAgent(App):
         depth = delegation_depth_ctx.get()
 
         if is_done and is_subagent:
+            # Stop any tool-call spinners this sub-agent left running (e.g. a call
+            # that was timed out or abandoned never received its own completion event).
+            for _cw in state.get("calls", {}).values():
+                if not _cw._done:
+                    _cw.mark_stopped()
             widget = state.get(f"widget_{agent_name}")
             if widget:
                 start_time = state.get(f"start_time_{agent_name}", time.time())
