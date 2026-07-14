@@ -65,10 +65,11 @@ def _get_default_options():
 
 def _build_client():
     from openai import AsyncOpenAI
+    import httpx
     _async_client = AsyncOpenAI(
         base_url=config.cfg["api"]["openai_base_url"],
         api_key=os.getenv("OPENAI_API_KEY", "dummy"),
-        timeout=1800.0
+        timeout=httpx.Timeout(1800.0, connect=15.0, read=300.0)
     )
     return OpenAIChatCompletionClient(
         model=config.cfg["api"]["openai_model"],
@@ -179,7 +180,20 @@ def create_local_agent(builder, subagent_callback=None, session_data=None):
                             if getattr(update, "user_input_requests", None):
                                 user_input_requests.extend(update.user_input_requests)
                     except QuotaAbortException as e:
-                        return f"## Error for {task_name}\nTask forcefully aborted: {str(e)}\n---"
+                        from tools.fs import get_workspace_files
+                        try:
+                            _files = get_workspace_files()
+                        except Exception:
+                            _files = []
+                        _salvage = f"## Partial result for {task_name}\n"
+                        _salvage += f"(Task hit a quota limit and was stopped before returning a summary: {str(e)})\n\n"
+                        if final_text.strip():
+                            _salvage += f"### Findings gathered before stopping:\n{final_text}\n\n"
+                        if _files:
+                            _salvage += "### Files already fetched to the workspace — delegate an Analyzer to read these for content:\n"
+                            _salvage += "\n".join(f"- {f}" for f in _files) + "\n"
+                        _salvage += "---"
+                        return _salvage
                             
                     if user_input_requests:
                         has_requests = True
