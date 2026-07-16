@@ -1,6 +1,7 @@
 import os
 import asyncio
 import re
+import copy
 from agent_framework.openai import OpenAIChatCompletionClient
 from agent_framework import tool, AgentSession
 from tools import WORKSPACE_TOOLS, tool_quotas_ctx, with_quota, think_tool, QuotaAbortException
@@ -130,7 +131,18 @@ def create_local_agent(builder, subagent_callback=None, session_data=None):
                 
                 # Scope the available sub-agents for the target agent's own delegate_tasks calls
                 children_token = available_sub_agents_ctx.set(target_children)
-                    
+
+                # Per-task web_calls budget: give this task its own quota context
+                # seeded with its allocated share, so tasks don't share one global pool.
+                quota_token = None
+                if web_calls_budget is not None:
+                    _parent_quota = tool_quotas_ctx.get()
+                    if _parent_quota and "web_calls" in _parent_quota:
+                        _task_quota = copy.deepcopy(_parent_quota)
+                        _task_quota["web_calls"]["limit"] = web_calls_budget
+                        _task_quota["web_calls"]["used"] = 0
+                        quota_token = tool_quotas_ctx.set(_task_quota)
+
                 sub_instr = ""
                 if target_config:
                     sub_instr = _safe_format(
@@ -211,6 +223,8 @@ def create_local_agent(builder, subagent_callback=None, session_data=None):
 
                 return f"## Result for {task_name}\n{final_text}\n---"
             finally:
+                if quota_token is not None:
+                    tool_quotas_ctx.reset(quota_token)
                 available_sub_agents_ctx.reset(children_token)
                 holds_token.reset(token_setter)
                 delegation_depth_ctx.reset(depth_token)
