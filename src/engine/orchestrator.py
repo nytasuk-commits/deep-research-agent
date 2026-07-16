@@ -99,7 +99,7 @@ def create_local_agent(builder, subagent_callback=None, session_data=None):
 
     holds_token = contextvars.ContextVar('holds_token', default=False)
 
-    async def _run_single_task(task_name: str, instructions: str, agent_id: str = None) -> str:
+    async def _run_single_task(task_name: str, instructions: str, agent_id: str = None, web_calls_budget: int = None) -> str:
         async with sem:
             parent_depth = delegation_depth_ctx.get()
             depth_token = delegation_depth_ctx.set(parent_depth + 1)
@@ -225,12 +225,32 @@ def create_local_agent(builder, subagent_callback=None, session_data=None):
     @tool(name="delegate_tasks", description="Delegate multiple independent tasks to specialized sub-agents to be executed concurrently. Pass a list of dictionaries, each with 'task_name', 'instructions', and optionally 'agent_id'.")
     @with_quota
     async def delegate_tasks(tasks: list[dict]) -> str:
+        # Step A: Compute per-task web_calls allocation
+        global_budget = config.cfg.get("settings", {}).get("quotas", {}).get("web_calls", {}).get("limit", 100)
+        allocation_settings = config.cfg.get("settings", {}).get("allocation", {})
+        flatness_constant = allocation_settings.get("flatness_constant", 7)
+        floor = allocation_settings.get("floor", 6)
+
+        N = len(tasks)
+        # Compute weights: W_i = (N - i) + flatness_constant for 0-based index i
+        weights = [(N - i) + flatness_constant for i in range(N)]
+        sum_weights = sum(weights)
+
+        # Compute shares: floor_weighted proportion of budget, with minimum floor
+        task_shares = []
+        for i in range(N):
+            weight = weights[i]
+            share = int(weight / sum_weights * global_budget)
+            share = max(floor, share)
+            task_shares.append(share)
+
         coroutines = []
-        for t in tasks:
+        for idx, t in enumerate(tasks):
             name = t.get("task_name", "Unknown_Task")
             instr = t.get("instructions", "")
             aid = t.get("agent_id", None)
-            coroutines.append(_run_single_task(name, instr, aid))
+            web_calls_budget = task_shares[idx]
+            coroutines.append(_run_single_task(name, instr, aid, web_calls_budget))
             
         was_holding = holds_token.get()
         if was_holding:
