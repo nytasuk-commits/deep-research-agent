@@ -10,6 +10,11 @@ review_phase_ctx = contextvars.ContextVar('review_phase', default=False)
 # Repeat detection threshold: consecutive identical calls beyond this count are refused
 _REPEAT_THRESHOLD = 1
 
+_QUOTA_ALIASES = {
+    "web_search": "web_calls",
+    "fetch_url_to_workspace": "web_calls",
+}
+
 class QuotaAbortException(BaseException):
     """Raised when a tool is called repeatedly despite being over quota, indicating an LLM loop."""
     pass
@@ -17,6 +22,7 @@ class QuotaAbortException(BaseException):
 def check_quota(tool_name: str) -> str | None:
     """Check if the specific tool has exceeded its per-invocation quota."""
     ctx = tool_quotas_ctx.get()
+    tool_name = _QUOTA_ALIASES.get(tool_name, tool_name)
     if ctx and tool_name in ctx:
         effective_limit = ctx[tool_name]["limit"]
         reserve = ctx[tool_name].get("rules", {}).get("reserve", 0)
@@ -101,6 +107,7 @@ def _check_repeat(tool_name: str, args: tuple, kwargs: dict) -> str | None:
 def _get_tool_rule(tool_name: str, rule_key: str, default_val: int) -> int:
     """Extract custom quota rules (like max_lines) for a specific tool."""
     ctx = tool_quotas_ctx.get()
+    tool_name = _QUOTA_ALIASES.get(tool_name, tool_name)
     if ctx and tool_name in ctx and "rules" in ctx[tool_name]:
         return ctx[tool_name]["rules"].get(rule_key, default_val)
     return default_val
