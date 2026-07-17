@@ -141,6 +141,7 @@ def create_local_agent(builder, subagent_callback=None, session_data=None):
                         _task_quota = copy.deepcopy(_parent_quota)
                         _task_quota["web_calls"]["limit"] = web_calls_budget
                         _task_quota["web_calls"]["used"] = 0
+                        _task_quota["web_calls"].pop("rules", None)
                         quota_token = tool_quotas_ctx.set(_task_quota)
 
                 sub_instr = ""
