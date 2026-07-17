@@ -241,7 +241,8 @@ def create_local_agent(builder, subagent_callback=None, session_data=None):
     @with_quota
     async def delegate_tasks(tasks: list[dict]) -> str:
         # Step A: Compute per-task web_calls allocation
-        global_budget = config.cfg.get("settings", {}).get("quotas", {}).get("web_calls", {}).get("limit", 100)
+        _wc = config.cfg.get("settings", {}).get("quotas", {}).get("web_calls", {})
+        global_budget = _wc.get("limit", 100) - _wc.get("rules", {}).get("reserve", 0)
         allocation_settings = config.cfg.get("settings", {}).get("allocation", {})
         flatness_constant = allocation_settings.get("flatness_constant", 7)
         floor = allocation_settings.get("floor", 6)
