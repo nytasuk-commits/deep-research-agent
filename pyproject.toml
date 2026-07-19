@@ -13,6 +13,7 @@ dependencies = [
     "agent-framework",
     "python-dotenv",
     "httpx",
+    "truststore",
     "textual",
     "beautifulsoup4",
     "PyYAML",
