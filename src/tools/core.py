@@ -6,10 +6,9 @@ import asyncio
 # Protects local LLM workflows from infinite retry loops (e.g., repeatedly failing to parse a URL)
 tool_quotas_ctx = contextvars.ContextVar('tool_quotas', default=None)
 review_phase_ctx = contextvars.ContextVar('review_phase', default=False)
-_last_call_ctx = contextvars.ContextVar('last_call', default=None)
 
 # Repeat detection threshold: consecutive identical calls beyond this count are refused
-_REPEAT_THRESHOLD = 3
+_REPEAT_THRESHOLD = 1
 
 class QuotaAbortException(BaseException):
     """Raised when a tool is called repeatedly despite being over quota, indicating an LLM loop."""
@@ -49,9 +48,14 @@ def _check_repeat(tool_name: str, args: tuple, kwargs: dict) -> str | None:
 
     Returns an error string if threshold exceeded, None otherwise.
     Never raises — returns None (allow call) on any failure.
+    State is stored in the per-task quota context dict to persist across calls.
     """
     try:
-        # Build stable signature
+        ctx = tool_quotas_ctx.get()
+        # No persistent store available — return None (can't track, allow)
+        if ctx is None:
+            return None
+
         import json
 
         def _default_serializer(obj):
@@ -61,18 +65,19 @@ def _check_repeat(tool_name: str, args: tuple, kwargs: dict) -> str | None:
         sig_data = (args, sorted_kwargs)
         new_sig = json.dumps(sig_data, sort_keys=True, default=_default_serializer)
 
-        # Read current last call state
-        last_call = _last_call_ctx.get()
+        # Read current last call state from quota context
+        last_call = ctx.get("_last_call")
 
         if last_call is None:
             # First call — store and allow
-            _last_call_ctx.set((tool_name, new_sig, 1))
+            ctx["_last_call"] = {"sig": new_sig, "count": 1}
             return None
 
-        curr_tool, curr_sig, count = last_call
+        curr_sig = last_call.get("sig")
+        count = last_call.get("count", 0)
 
-        if tool_name == curr_tool and new_sig == curr_sig:
-            # Same tool and same args — increment count
+        if new_sig == curr_sig:
+            # Same args — increment count
             count += 1
             if count > _REPEAT_THRESHOLD:
                 error_msg = (
@@ -80,14 +85,14 @@ def _check_repeat(tool_name: str, args: tuple, kwargs: dict) -> str | None:
                     f"Repeating the same call will not produce a different result. STOP repeating — use the "
                     f"information you already have to complete your task, or make a DIFFERENT call."
                 )
-                _last_call_ctx.set((tool_name, new_sig, count))
+                ctx["_last_call"] = {"sig": new_sig, "count": count}
                 return error_msg
-            # Below threshold — store updated count and allow
-            _last_call_ctx.set((tool_name, new_sig, count))
+            # Below threshold — store updated count in place
+            ctx["_last_call"] = {"sig": new_sig, "count": count}
             return None
         else:
-            # Different tool or different args — reset counter
-            _last_call_ctx.set((tool_name, new_sig, 1))
+            # Different args — reset counter
+            ctx["_last_call"] = {"sig": new_sig, "count": 1}
             return None
     except Exception:
         # On any failure, allow the call (return None)
