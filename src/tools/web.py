@@ -5,12 +5,41 @@ import os
 import re
 import asyncio
 import threading
+import hashlib
 from bs4 import BeautifulSoup
 from agent_framework import tool
 from tools.core import with_quota
-from tools.fs import _get_safe_path, _get_workspace_type, _get_workspace_dir, _IN_MEMORY_FS
+from tools.fs import _get_safe_path, _get_workspace_type, _get_workspace_dir, _IN_MEMORY_FS, session_dir_ctx
 
 _ddgs_lock = threading.Lock()
+_dedup_lock = threading.Lock()
+_fetched_urls = {}
+_fetched_hashes = {}
+
+
+def _dedup_reset_to_current(run_key: str):
+    """Reset dedup registry to only hold the current run's data.
+
+    Removes all entries not matching run_key from both URL and hash registries.
+    This guarantees the dicts only ever hold one run's data — no memory growth
+    across runs.
+    """
+    with _dedup_lock:
+        # Remove all keys that are not the current run_key
+        for key in list(_fetched_urls.keys()):
+            if key != run_key:
+                del _fetched_urls[key]
+        for key in list(_fetched_hashes.keys()):
+            if key != run_key:
+                del _fetched_hashes[key]
+
+        # Ensure current run's entries exist (empty dict if new)
+        if run_key not in _fetched_urls:
+            _fetched_urls[run_key] = {}
+        if run_key not in _fetched_hashes:
+            _fetched_hashes[run_key] = {}
+
+
 _ddgs_client = None
 _consecutive_search_failures = 0
 _backoff_lock = asyncio.Lock()
@@ -90,6 +119,11 @@ def get_ddgs_client():
 async def fetch_url_to_workspace(url: str, filename: str, convert_to_md: bool = True) -> str:
     """Fetch external web content and save it directly to the workspace. If convert_to_md is True, parses to Markdown."""
     import config as app_config
+
+    # Per-run dedup reset — prunes stale runs, keeps memory bounded
+    run_key = session_dir_ctx.get()
+    _dedup_reset_to_current(run_key)
+
     _blocked = app_config.cfg.get("settings", {}).get("blocked_fetch_domains", []) or []
     _host = re.sub(r"^https?://(www\.)?", "", url.lower()).split("/")[0]
     for _dom in _blocked:
@@ -97,6 +131,14 @@ async def fetch_url_to_workspace(url: str, filename: str, convert_to_md: bool = 
             return (f"BLOCKED DOMAIN: {_dom} is on the known-hostile list (login walls / bot protection / "
                     f"no scrapable content). Nothing was fetched. Do NOT retry this website — find the same "
                     f"information from a different source.")
+
+    # URL dedup check — early return if already fetched this run
+    with _dedup_lock:
+        if url in _fetched_urls.get(run_key, {}):
+            existing = _fetched_urls[run_key][url]
+            return (f"ALREADY FETCHED this run. SAVED_FILENAME={existing}\n"
+                    f"This URL was already retrieved and saved as '{existing}'. Delegate that file to the Analyzer "
+                    f"instead of re-fetching.")
 
     def _fetch():
         import time
@@ -213,6 +255,15 @@ async def fetch_url_to_workspace(url: str, filename: str, convert_to_md: bool = 
                         f"likely a stub, error, or image-only page with no usable text. Nothing was saved. "
                         f"Find the information from a different source.")
 
+            # Content dedup check — return early if identical content already saved this run
+            md5 = hashlib.md5(data.encode('utf-8', 'replace')).hexdigest()
+            with _dedup_lock:
+                if md5 in _fetched_hashes.get(run_key, {}):
+                    existing = _fetched_hashes[run_key][md5]
+                    return (f"DUPLICATE CONTENT. SAVED_FILENAME={existing}\n"
+                            f"This page's content is byte-identical to '{existing}' already saved this run. "
+                            f"Use that file; nothing new was saved.")
+
             # Prepend provenance marker only if images were actually stripped
             if removed_count > 0:
                 provenance_note = (
@@ -229,6 +280,13 @@ async def fetch_url_to_workspace(url: str, filename: str, convert_to_md: bool = 
             mode = "wb"
             encoding = None
         
+        # Record successful fetch in dedup registry
+        with _dedup_lock:
+            _fetched_urls[run_key][url] = filename
+            # md5 only exists for string/markdown content; binary fetches skip hash dedup
+            if isinstance(data, str):
+                _fetched_hashes[run_key][md5] = filename
+
         if _get_workspace_type() == "disk":
             parent_dir = os.path.dirname(path)
             if parent_dir:
