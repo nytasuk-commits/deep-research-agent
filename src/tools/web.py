@@ -16,6 +16,9 @@ _consecutive_search_failures = 0
 _backoff_lock = asyncio.Lock()
 
 
+_MIN_CONTENT_CHARS = 200
+
+
 def _strip_image_markdown(text: str) -> tuple[str, int]:
     """Strip standalone image-markdown lines from text.
 
@@ -194,6 +197,13 @@ async def fetch_url_to_workspace(url: str, filename: str, convert_to_md: bool = 
         if isinstance(data, str):
             # Strip standalone image-markdown lines and track removal count
             data, removed_count = _strip_image_markdown(data)
+
+            # Reject too-short content BEFORE adding the provenance note, so the note's
+            # characters don't inflate the length past the threshold (e.g. image-only pages).
+            if len(data) < _MIN_CONTENT_CHARS:
+                return (f"TOO SHORT: {url} returned only {len(data)} characters of content after cleaning — "
+                        f"likely a stub, error, or image-only page with no usable text. Nothing was saved. "
+                        f"Find the information from a different source.")
 
             # Prepend provenance marker only if images were actually stripped
             if removed_count > 0:
