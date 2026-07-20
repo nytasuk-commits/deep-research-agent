@@ -15,6 +15,55 @@ _ddgs_client = None
 _consecutive_search_failures = 0
 _backoff_lock = asyncio.Lock()
 
+
+def _strip_image_markdown(text: str) -> tuple[str, int]:
+    """Strip standalone image-markdown lines from text.
+
+    Returns (cleaned_text, num_lines_removed).
+    Only removes whole-line standalone images; inline images in text are untouched.
+    Collapses 3+ consecutive blank lines to a single blank line.
+    On any error, returns (original_text, 0).
+    """
+    try:
+        lines = text.splitlines(keepends=True)
+        original_count = len(lines)
+
+        # Patterns for standalone image markdown
+        # Format: ![[alt](url)] or ![alt](url) - one per line, possibly with leading/trailing whitespace
+        image_pattern = re.compile(r'^\s*!\[[^\]]*\]\([^)]*\)\s*$')
+        linked_image_pattern = re.compile(r'^\s*\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)\s*$')
+
+        cleaned_lines = []
+        removed_count = 0
+
+        for line in lines:
+            # Check if this is a standalone image line
+            if image_pattern.match(line) or linked_image_pattern.match(line):
+                removed_count += 1
+            else:
+                cleaned_lines.append(line)
+
+        # Collapse 3+ consecutive blank lines to a single blank line
+        result_lines = []
+        blank_run_count = 0
+
+        for line in cleaned_lines:
+            if line.strip() == '':
+                blank_run_count += 1
+                if blank_run_count <= 1:
+                    result_lines.append(line)
+                # Skip additional blank lines in the run
+            else:
+                blank_run_count = 0
+                result_lines.append(line)
+
+        return (''.join(result_lines), removed_count)
+
+    except Exception:
+        # Fully defensive: on any error, return original text with 0 removed
+        return (text, 0)
+
+
 def get_ddgs_client():
     """Thread-safe lazy initialization of the DDGS client."""
     global _ddgs_client
@@ -143,6 +192,17 @@ async def fetch_url_to_workspace(url: str, filename: str, convert_to_md: bool = 
         if not path: return f"Error: Invalid filename '{filename}'."
         
         if isinstance(data, str):
+            # Strip standalone image-markdown lines and track removal count
+            data, removed_count = _strip_image_markdown(data)
+
+            # Prepend provenance marker only if images were actually stripped
+            if removed_count > 0:
+                provenance_note = (
+                    f"_Note: {removed_count} inline image reference(s) were stripped from this page during fetch "
+                    f"to reduce noise. The original page contained images not reproduced here._\n"
+                )
+                data = provenance_note + "\n" + data
+
             chunk = data[:5000000] # Allow larger sizes for markdown text (up to 5MB)
             mode = "w"
             encoding = "utf-8"
