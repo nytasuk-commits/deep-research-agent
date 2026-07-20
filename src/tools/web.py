@@ -18,6 +18,11 @@ _backoff_lock = asyncio.Lock()
 
 _MIN_CONTENT_CHARS = 200
 
+# Hard wall-clock ceiling for the entire fetch operation (seconds)
+# This caps total fetch time regardless of httpx's internal timeout behavior,
+# preventing byte-trickle servers from causing unbounded wait times.
+_FETCH_HARD_CEILING = 60
+
 
 def _strip_image_markdown(text: str) -> tuple[str, int]:
     """Strip standalone image-markdown lines from text.
@@ -166,7 +171,10 @@ async def fetch_url_to_workspace(url: str, filename: str, convert_to_md: bool = 
 
         
     try:
-        data = await asyncio.to_thread(_fetch)
+        try:
+            data = await asyncio.wait_for(asyncio.to_thread(_fetch), timeout=_FETCH_HARD_CEILING)
+        except asyncio.TimeoutError:
+            return f"FETCH TIMEOUT: {url} exceeded the {_FETCH_HARD_CEILING}s hard limit (likely a slow or trickling server). Nothing was saved. Try a different source."
 
         # Detect bot-challenge / block / error pages before saving junk to the workspace
         if isinstance(data, str) and len(data) < 20000:
