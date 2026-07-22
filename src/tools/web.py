@@ -216,16 +216,28 @@ async def fetch_url_to_workspace(url: str, filename: str, convert_to_md: bool = 
                         try:
                             import json as _json
                             _soup = BeautifulSoup(resp.content, "html.parser")
+                            # Cap appended JSON so large analytics/variant/image blobs do not
+                            # bloat the file and starve the Analyzer's read/grep budget.
+                            # Measured: price data sits in a ~4KB blob; noise blobs are ~58KB.
+                            # A 10KB per-blob cap keeps price/product data and drops the bloat.
+                            _PER_BLOB_CAP = 10000
+                            _TOTAL_CAP = 20000
                             _blobs = []
+                            _total = 0
                             for _s in _soup.find_all("script"):
                                 _txt = (_s.string or _s.get_text() or "").strip()
                                 if not _txt or len(_txt) < 10:
+                                    continue
+                                if len(_txt) > _PER_BLOB_CAP:
                                     continue
                                 try:
                                     _json.loads(_txt)
                                 except Exception:
                                     continue
+                                if _total + len(_txt) > _TOTAL_CAP:
+                                    break
                                 _blobs.append(_txt)
+                                _total += len(_txt)
                             if _blobs:
                                 _joined = "\n\n".join(_blobs)
                                 md_content = md_content + "\n\n## Embedded structured data (JSON)\n\n" + _joined
