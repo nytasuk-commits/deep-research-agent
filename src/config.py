@@ -75,6 +75,15 @@ def load_config() -> dict:
             dir_str = ws["dir"].replace("{APP_NAME}", APP_NAME)
             ws["dir"] = os.path.abspath(os.path.expanduser(dir_str))
 
+    # Apply fast-test overlay if enabled
+    settings = cfg.get("settings", {})
+    fast_test = settings.get("fast_test", {})
+    if isinstance(fast_test, dict) and fast_test.get("enabled", False):
+        overrides = fast_test.get("overrides", {})
+        if isinstance(overrides, dict):
+            cfg["settings"] = _deep_merge(cfg["settings"], overrides)
+            print("[config] FAST-TEST MODE ACTIVE — quotas reduced", file=sys.stderr)
+
     # Overlay API keys from environment if set (env takes priority for secrets)
     if os.environ.get("OPENAI_API_BASE"):
         cfg["api"]["openai_base_url"] = os.environ["OPENAI_API_BASE"]
