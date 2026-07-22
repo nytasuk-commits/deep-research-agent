@@ -120,6 +120,7 @@ async def fetch_url_to_workspace(url: str, filename: str, convert_to_md: bool = 
                 "Error 403 Forbidden", "Error 1020",
                 "Sorry, something went wrong.",
                 "local_rate_limited", "local\\_rate\\_limited",
+                "Click the button below to continue shopping",
             )
             if any(m in data for m in _block_markers):
                 return (f"BLOCKED: {url} returned a bot-challenge, access-denied, or error page instead of "
