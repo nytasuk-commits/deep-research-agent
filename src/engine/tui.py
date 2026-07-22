@@ -1353,7 +1353,9 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
         enforced_artifact_check = False
         enforced_review_check = False
         report_just_written = False
-        
+        review_rounds = 0
+        _MAX_REVIEW_ROUNDS = 2
+
         while has_requests:
             has_requests = False
             user_input_requests = []
@@ -1381,7 +1383,7 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
                             log_stream_content("Agent", "function_result", {
                                 "call_id": call_id, "result": str(result)
                             })
-                            if not enforced_review_check and "final_report.md" in str(result):
+                            if review_rounds < _MAX_REVIEW_ROUNDS and "final_report.md" in str(result):
                                 report_just_written = True
                 if getattr(update, "user_input_requests", None):
                     user_input_requests.extend(update.user_input_requests)
@@ -1449,14 +1451,14 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
                     except Exception as e:
                         pass
 
-            if report_just_written and not enforced_review_check:
+            if report_just_written and review_rounds < _MAX_REVIEW_ROUNDS:
                 report_just_written = False
-                enforced_review_check = True
+                review_rounds += 1
                 has_requests = True
                 from tools.core import review_phase_ctx
                 review_phase_ctx.set(True)
 
-                warning_msg = "\n\033[93m[System] Draft report written. Enforcing mandatory review before completion.\033[0m\n"
+                warning_msg = f"\n\033[93m[System] Report written. Enforcing review (round {review_rounds} of {_MAX_REVIEW_ROUNDS}).\033[0m\n"
                 sys.stdout.write(warning_msg)
 
                 inject_msg = ("SYSTEM: You have just written final_report.md. Do NOT summarize or present results to the user yet. "
