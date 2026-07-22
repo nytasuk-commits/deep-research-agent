@@ -3,3 +3,9 @@ __pycache__
 .env
 deep_research_agent.egg-info/
 venv/
+.claude/
+
+# scratch diagnostics
+capture_request.py
+captured_request.json
+probe_*.py
