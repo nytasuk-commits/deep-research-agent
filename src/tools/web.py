@@ -208,6 +208,29 @@ async def fetch_url_to_workspace(url: str, filename: str, convert_to_md: bool = 
                 try:
                     md_content = convert_to_markdown(tmp_path)
                     if md_content:
+                        # Preserve embedded structured data (JSON inside <script> tags)
+                        # that markitdown discards. This is generic: it keeps any valid
+                        # JSON blob (product data, schema.org, etc.) regardless of site,
+                        # so facts that live only in page JSON (e.g. prices) survive into
+                        # what the Analyzer reads. Executable (non-JSON) scripts are skipped.
+                        try:
+                            import json as _json
+                            _soup = BeautifulSoup(resp.content, "html.parser")
+                            _blobs = []
+                            for _s in _soup.find_all("script"):
+                                _txt = (_s.string or _s.get_text() or "").strip()
+                                if not _txt or len(_txt) < 10:
+                                    continue
+                                try:
+                                    _json.loads(_txt)
+                                except Exception:
+                                    continue
+                                _blobs.append(_txt)
+                            if _blobs:
+                                _joined = "\n\n".join(_blobs)
+                                md_content = md_content + "\n\n## Embedded structured data (JSON)\n\n" + _joined
+                        except Exception:
+                            pass
                         return md_content
                 finally:
                     os.unlink(tmp_path)
