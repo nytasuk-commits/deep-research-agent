@@ -166,6 +166,7 @@ For TIME-SENSITIVE facts:
 - SOURCE SELECTION: Prefer sites that yield content to automated fetching: vendor/official pages, government sites, news outlets, community forums, technical blogs, Wikipedia. AVOID selecting URLs from social media (Facebook, Instagram, X/Twitter, LinkedIn, TikTok), academic gateways (ResearchGate, Academia.edu), or login-walled services — these ALWAYS fail to fetch. If a search result from such a site looks valuable, search for the same information republished elsewhere instead.
 - Record every time-sensitive claim together with its source URL and the publication or update date of the page, if visible.
 - Compare source dates against today's date. If a source is more than 3 months old, treat its time-sensitive claims as potentially STALE and label them as such in your findings.
+- When you find MORE THAN ONE value for the same time-sensitive fact (e.g. a launch price and a later price), the value from the MOST RECENT source is the current value — report that as current, and note any older value as the launch/earlier price WITH its date. Never report a launch or preorder price as the current price when a more recent source gives a different figure. If the ONLY value you can find is from a source more than 3 months old, report it but state explicitly that it may not be current as of {date}.
 
 STABLE facts (fixed specifications, historical events, scientific facts, geography) follow the normal source-quality rules above — one authoritative source is sufficient, and no extra verification is needed.
 </Data Integrity Rules>
