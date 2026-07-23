@@ -224,6 +224,7 @@ async def fetch_url_to_workspace(url: str, filename: str, convert_to_md: bool = 
                             _TOTAL_CAP = 20000
                             _blobs = []
                             _total = 0
+                            _paywalled = False
                             for _s in _soup.find_all("script"):
                                 _txt = (_s.string or _s.get_text() or "").strip()
                                 if not _txt or len(_txt) < 10:
@@ -231,13 +232,28 @@ async def fetch_url_to_workspace(url: str, filename: str, convert_to_md: bool = 
                                 if len(_txt) > _PER_BLOB_CAP:
                                     continue
                                 try:
-                                    _json.loads(_txt)
+                                    _parsed = _json.loads(_txt)
                                 except Exception:
                                     continue
+                                # schema.org standard: content behind a paywall/meter
+                                # self-declares via isAccessibleForFree=false. Generic —
+                                # any site publishing this metadata, not site-specific.
+                                if '"isAccessibleForFree"' in _txt and 'false' in _txt.lower():
+                                    _paywalled = True
                                 if _total + len(_txt) > _TOTAL_CAP:
                                     break
                                 _blobs.append(_txt)
                                 _total += len(_txt)
+                            if _paywalled:
+                                md_content = (
+                                    "> **PARTIAL CONTENT — PAYWALLED SOURCE.** This page declares "
+                                    "`isAccessibleForFree: false`, so only a free preview was retrieved. "
+                                    "The full article body is NOT present. Any figure appearing here may be "
+                                    "incomplete or stripped of the conditions it applies to. Do NOT treat "
+                                    "numbers from this page as verified, and do NOT assume they apply to the "
+                                    "hardware or configuration in your task unless the preview states so "
+                                    "explicitly.\n\n"
+                                ) + md_content
                             if _blobs:
                                 _joined = "\n\n".join(_blobs)
                                 md_content = md_content + "\n\n## Embedded structured data (JSON)\n\n" + _joined
