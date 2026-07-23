@@ -12,8 +12,11 @@ settings:
     # e.g. "web_search: 10" becomes {web_search_quota} = 10 in your prompts.
     # Both flat integers and dict-with-limit are supported.
     delegate_tasks: 20
-    web_search: 10
-    fetch_url_to_workspace: 20
+    # web_search and fetch_url_to_workspace are aliased to this shared counter
+    web_calls:
+      limit: 100
+      rules:
+        reserve: 10
     write_workspace_file: 20
     write_todos: 30
     read_todos: 30
@@ -27,6 +30,23 @@ settings:
       rules:
         max_matches: 15
     list_workspace_files: 20
+  fast_test:
+    enabled: false
+    overrides:
+      concurrency:
+        max_concurrent_tasks: 1
+      quotas:
+        web_calls:
+          limit: 30
+        delegate_tasks: 12
+        read_workspace_file:
+          limit: 15
+        grep_workspace_file:
+          limit: 15
+        write_workspace_file: 5
+  allocation:
+    flatness_constant: 7
+    floor: 6
   enable_conversational_memory: true
   enable_session_persistence: true
   workspace:
