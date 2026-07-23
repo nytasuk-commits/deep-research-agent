@@ -42,8 +42,10 @@ def check_quota(tool_name: str) -> str | None:
             return (
                 f"Error: Quota reached. You have used the '{tool_name}' tool "
                 f"{ctx[tool_name]['limit']} times out of your limit. "
-                f"You MUST summarize what you've done and state clearly that you "
-                f"had to stop due to quota limits."
+                f"STOP CALLING TOOLS NOW. Do NOT call think_tool. Do NOT reflect on "
+                f"being blocked. Write your findings so far as your FINAL ANSWER in "
+                f"plain text and end your turn, stating clearly that you had to stop "
+                f"due to quota limits. Any further tool call is a failure."
             )
         ctx[tool_name]["used"] += 1
     return None
