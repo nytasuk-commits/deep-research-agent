@@ -183,13 +183,30 @@ def create_local_agent(builder, subagent_callback=None, session_data=None):
                     
                     try:
                         stream = sub_agent.run(current_input, stream=True)
-                        async for update in stream:
+                        # Hard inactivity ceiling: httpx read timeouts do not bound a
+                        # trickling/stalled SSE stream, so a model stall would otherwise
+                        # hang this sub-agent (and the whole run) indefinitely. Bounds the
+                        # GAP BETWEEN updates, not total generation time.
+                        _STREAM_INACTIVITY_CEILING = 900
+                        _stream_iter = stream.__aiter__()
+                        while True:
+                            try:
+                                update = await asyncio.wait_for(
+                                    _stream_iter.__anext__(), timeout=_STREAM_INACTIVITY_CEILING
+                                )
+                            except StopAsyncIteration:
+                                break
+                            except asyncio.TimeoutError:
+                                final_text += (f"\n\n[SYSTEM: This task's LLM stream produced no output for "
+                                               f"{_STREAM_INACTIVITY_CEILING}s and was aborted. "
+                                               f"Findings above may be incomplete.]\n")
+                                break
                             if subagent_callback:
                                 await subagent_callback(update, is_subagent=True, agent_name=f"SubAgent_{task_name}")
                             for c in update.contents:
                                 if c.type == "text" and c.text:
                                     final_text += c.text
-                                    
+
                             if getattr(update, "user_input_requests", None):
                                 user_input_requests.extend(update.user_input_requests)
                     except QuotaAbortException as e:
