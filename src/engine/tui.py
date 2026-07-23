@@ -1382,7 +1382,23 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
             
             try:
                 stream = agent.run(current_input, session=session, stream=True)
-                async for update in stream:
+                # Hard inactivity ceiling: httpx read timeouts do not bound a stalled
+                # SSE stream. Bounds the GAP BETWEEN updates, not total generation.
+                _STREAM_INACTIVITY_CEILING = 900
+                _stream_iter = stream.__aiter__()
+                while True:
+                    try:
+                        update = await asyncio.wait_for(
+                            _stream_iter.__anext__(), timeout=_STREAM_INACTIVITY_CEILING
+                        )
+                    except StopAsyncIteration:
+                        break
+                    except asyncio.TimeoutError:
+                        sys.stdout.write(
+                            f"\n\033[91m[System] LLM stream produced no output for "
+                            f"{_STREAM_INACTIVITY_CEILING}s — aborting this turn.\033[0m\n")
+                        sys.stdout.flush()
+                        break
                     for content in update.contents:
                         if content.type == "text" and content.text:
                             log_stream_content("Agent", "text", {"text": content.text})
