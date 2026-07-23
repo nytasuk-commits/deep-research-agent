@@ -89,7 +89,15 @@ def read_workspace_file(filename: str, start_line: int = 1, end_line: int = -1) 
         end = min(total, end_line)
         
         if (end - start + 1) > max_lines:
-            return f"Error: Requested {end - start + 1} lines, but your quota restricts you to {max_lines} lines per read. Use grep_workspace_file or chunked bounds."
+            # Never refuse an oversized read — serve the first max_lines from the
+            # requested start as a useful slice instead of wasting the charged call.
+            # The agent gets content AND the file length, then uses grep for the rest.
+            end = min(total, start + max_lines - 1)
+            chunk = "\n".join(lines[start - 1:end])
+            return (f"--- {filename} [Lines {start}-{end} of {total}] ---\n{chunk}\n\n"
+                    f"[NOTE: This file is {total} lines; you have been given lines {start}-{end}. "
+                    f"Do NOT request more than {max_lines} lines at once. Use grep_workspace_file "
+                    f"on this file to locate content beyond line {end}, then read only those line ranges.]")
             
         chunk = "\n".join(lines[start - 1:end])
         return f"--- {filename} [Lines {start}-{end} of {total}] ---\n{chunk}"
