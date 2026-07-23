@@ -474,6 +474,16 @@ class BasicTuiAgent(App):
         
         if getattr(self, "session_to_resume", None):
             await self._load_session_by_id(self.session_to_resume)
+        else:
+            # Auto-prime the session. The first real request to a fresh session
+            # malforms the tool-call stream (Qwen XML chat template + LM Studio not
+            # stream-parsing it), so a throwaway turn is required first. This sends
+            # that turn automatically: the user's prompt is suppressed, but the
+            # agent's greeting is shown, so it reads as the agent saying hello.
+            # Skipped on session resume — a restored session is already primed.
+            # Deferred to after mount completes: starting the worker mid-mount runs it
+            # in a different context and breaks the agent framework's contextvar teardown.
+            self.set_timer(0.1, lambda: self.run_agent("Hello", show_user_message=False))
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if getattr(self, "_file_picker_active", False) or getattr(self, "_session_picker_active", False):
@@ -873,7 +883,7 @@ class BasicTuiAgent(App):
         self._safe_scroll_end(chat)
 
     @work(exclusive=True)
-    async def run_agent(self, query: str):
+    async def run_agent(self, query: str, show_user_message: bool = True):
         self._is_agent_running = True
         
         # Session directory isolation: when enabled, ALL workspace file operations
@@ -895,8 +905,9 @@ class BasicTuiAgent(App):
         token = tool_quotas_ctx.set(sub_quotas)
         
         chat = self.query_one("#chat-container", VerticalScroll)
-        chat.mount(UserMessageWidget(query))
-        
+        if show_user_message:
+            chat.mount(UserMessageWidget(query))
+
         # Set up subagent callback context dict
         subagent_states = {}
 
@@ -987,10 +998,10 @@ class BasicTuiAgent(App):
             try:
                 async for update in stream:
                     await self.handle_agent_update(update, state, chat, is_subagent=False)
-                    
+
                     if hasattr(update, "user_input_requests") and update.user_input_requests:
                         user_input_requests.extend(update.user_input_requests)
-                        
+
                 # -------------------------------------------------------------
                 # [!CAUTION] AGENT-FRAMEWORK SYNCHRONIZATION BUGFIX
                 # -------------------------------------------------------------
