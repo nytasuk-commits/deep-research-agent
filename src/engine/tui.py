@@ -985,32 +985,12 @@ class BasicTuiAgent(App):
             self._safe_scroll_end(chat)
             
             try:
-                # Hard inactivity ceiling on the LLM stream. httpx read timeouts do not
-                # bound a trickling/stalled SSE stream, so a model stall would otherwise
-                # hang the run indefinitely (observed: 8h stall at the synthesis boundary
-                # in session_e75b396d). This bounds the GAP BETWEEN updates, not the total
-                # run, so a legitimately long generation is unaffected.
-                _STREAM_INACTIVITY_CEILING = 900
-                _stream_iter = stream.__aiter__()
-                while True:
-                    try:
-                        update = await asyncio.wait_for(
-                            _stream_iter.__anext__(), timeout=_STREAM_INACTIVITY_CEILING
-                        )
-                    except StopAsyncIteration:
-                        break
-                    except asyncio.TimeoutError:
-                        chat.mount(Static(
-                            f"[red]\\[System] LLM stream produced no output for "
-                            f"{_STREAM_INACTIVITY_CEILING}s — aborting this turn.[/red]",
-                            classes="agent-bubble"))
-                        self._safe_scroll_end(chat)
-                        break
+                async for update in stream:
                     await self.handle_agent_update(update, state, chat, is_subagent=False)
-
+                    
                     if hasattr(update, "user_input_requests") and update.user_input_requests:
                         user_input_requests.extend(update.user_input_requests)
-
+                        
                 # -------------------------------------------------------------
                 # [!CAUTION] AGENT-FRAMEWORK SYNCHRONIZATION BUGFIX
                 # -------------------------------------------------------------
