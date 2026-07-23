@@ -273,6 +273,7 @@ async def fetch_url_to_workspace(url: str, filename: str, convert_to_md: bool = 
                 "Sorry, something went wrong.",
                 "local_rate_limited", "local\\_rate\\_limited",
                 "Click the button below to continue shopping",
+                "Sorry, we can't find the page you are looking for",
                 "We had to rate limit your IP", "Too Many Requests",
             )
             if any(m in data for m in _block_markers):
