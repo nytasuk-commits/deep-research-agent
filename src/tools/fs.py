@@ -3,7 +3,7 @@ import os
 import re
 import contextvars
 from agent_framework import tool
-from tools.core import with_quota, _get_tool_rule
+from tools.core import with_quota, _get_tool_rule, tool_quotas_ctx
 
 # --- WORKSPACE FILE SYSTEM ---
 _IN_MEMORY_FS: Dict[str, str] = {}
@@ -89,15 +89,33 @@ def read_workspace_file(filename: str, start_line: int = 1, end_line: int = -1) 
         end = min(total, end_line)
         
         if (end - start + 1) > max_lines:
-            # Never refuse an oversized read — serve the first max_lines from the
-            # requested start as a useful slice instead of wasting the charged call.
-            # The agent gets content AND the file length, then uses grep for the rest.
+            # First oversized read of a file: serve the first max_lines as a useful
+            # slice rather than wasting the charged call. The agent gets content AND
+            # the file length, then uses grep for the rest.
+            #
+            # REPEAT oversized read of the SAME file: refuse. Serving the same slice
+            # again lets an agent loop on an identical unbounded read (observed: 40
+            # identical calls on one file in session_6b67a03d). Refusing forces the
+            # correct grep-then-targeted-read pattern.
+            _ctx = tool_quotas_ctx.get()
+            _sliced = None
+            if isinstance(_ctx, dict):
+                _sliced = _ctx.setdefault("_sliced_files", set())
+            if _sliced is not None and filename in _sliced:
+                return (f"Error: You have already been served the first {max_lines} lines of "
+                        f"'{filename}' ({total} lines total). Requesting it again returns nothing new. "
+                        f"You MUST now either call grep_workspace_file on this file to locate the "
+                        f"content you need, or call read_workspace_file with explicit start_line and "
+                        f"end_line bounds spanning no more than {max_lines} lines.")
+            if _sliced is not None:
+                _sliced.add(filename)
             end = min(total, start + max_lines - 1)
             chunk = "\n".join(lines[start - 1:end])
             return (f"--- {filename} [Lines {start}-{end} of {total}] ---\n{chunk}\n\n"
                     f"[NOTE: This file is {total} lines; you have been given lines {start}-{end}. "
-                    f"Do NOT request more than {max_lines} lines at once. Use grep_workspace_file "
-                    f"on this file to locate content beyond line {end}, then read only those line ranges.]")
+                    f"Do NOT request this file again without bounds — it will be refused. Use "
+                    f"grep_workspace_file on this file to locate content beyond line {end}, then "
+                    f"read only those line ranges.]")
             
         chunk = "\n".join(lines[start - 1:end])
         return f"--- {filename} [Lines {start}-{end} of {total}] ---\n{chunk}"
