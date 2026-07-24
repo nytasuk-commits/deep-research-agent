@@ -474,6 +474,16 @@ class BasicTuiAgent(App):
         
         if getattr(self, "session_to_resume", None):
             await self._load_session_by_id(self.session_to_resume)
+        else:
+            # Auto-prime the session. The first real request to a fresh session
+            # malforms the tool-call stream (Qwen XML chat template + LM Studio not
+            # stream-parsing it), so a throwaway turn is required first. This sends
+            # that turn automatically: the user's prompt is suppressed, but the
+            # agent's greeting is shown, so it reads as the agent saying hello.
+            # Skipped on session resume — a restored session is already primed.
+            # Deferred to after mount completes: starting the worker mid-mount runs it
+            # in a different context and breaks the agent framework's contextvar teardown.
+            self.set_timer(0.1, lambda: self.run_agent("Hello", show_user_message=False))
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if getattr(self, "_file_picker_active", False) or getattr(self, "_session_picker_active", False):
@@ -721,6 +731,11 @@ class BasicTuiAgent(App):
         depth = delegation_depth_ctx.get()
 
         if is_done and is_subagent:
+            # Stop any tool-call spinners this sub-agent left running (e.g. a call
+            # that was timed out or abandoned never received its own completion event).
+            for _cw in state.get("calls", {}).values():
+                if not _cw._done:
+                    _cw.mark_stopped()
             widget = state.get(f"widget_{agent_name}")
             if widget:
                 start_time = state.get(f"start_time_{agent_name}", time.time())
@@ -868,7 +883,7 @@ class BasicTuiAgent(App):
         self._safe_scroll_end(chat)
 
     @work(exclusive=True)
-    async def run_agent(self, query: str):
+    async def run_agent(self, query: str, show_user_message: bool = True):
         self._is_agent_running = True
         
         # Session directory isolation: when enabled, ALL workspace file operations
@@ -890,8 +905,9 @@ class BasicTuiAgent(App):
         token = tool_quotas_ctx.set(sub_quotas)
         
         chat = self.query_one("#chat-container", VerticalScroll)
-        chat.mount(UserMessageWidget(query))
-        
+        if show_user_message:
+            chat.mount(UserMessageWidget(query))
+
         # Set up subagent callback context dict
         subagent_states = {}
 
@@ -965,6 +981,7 @@ class BasicTuiAgent(App):
         agent, session = create_local_agent(builder=self.builder, subagent_callback=ui_callback)
         current_input = query
         has_requests = True
+        enforced_review_check = False
         state = {"calls": {}, "current_call_id": None, "current_msg": None}
         
         while has_requests:
@@ -981,10 +998,10 @@ class BasicTuiAgent(App):
             try:
                 async for update in stream:
                     await self.handle_agent_update(update, state, chat, is_subagent=False)
-                    
+
                     if hasattr(update, "user_input_requests") and update.user_input_requests:
                         user_input_requests.extend(update.user_input_requests)
-                        
+
                 # -------------------------------------------------------------
                 # [!CAUTION] AGENT-FRAMEWORK SYNCHRONIZATION BUGFIX
                 # -------------------------------------------------------------
@@ -1069,7 +1086,34 @@ class BasicTuiAgent(App):
                 
                 # Push back upstream and flush state 
                 current_input = new_inputs
-                
+
+            if not has_requests and not enforced_review_check:
+                try:
+                    from tools.fs import get_workspace_files
+                    report_exists = "final_report.md" in get_workspace_files()
+                except Exception:
+                    report_exists = False
+                review_done = any(
+                    ev.get("type") == "function_call"
+                    and ev.get("data", {}).get("name") == "delegate_tasks"
+                    and "Reviewer" in (ev.get("data", {}).get("arguments") or "")
+                    for ev in _session_events
+                )
+                if report_exists and not review_done:
+                    enforced_review_check = True
+                    has_requests = True
+                    from tools.core import review_phase_ctx
+                    review_phase_ctx.set(True)
+                    chat.mount(Static("[yellow]\\[System] Draft report written. Enforcing mandatory review before completion.[/yellow]", classes="agent-bubble"))
+                    self._safe_scroll_end(chat)
+                    inject_msg = ("SYSTEM: You have written final_report.md but it has not been reviewed. Do NOT present results as final. "
+                                  "You MUST now: 1) call delegate_tasks with agent_id 'Reviewer' and instructions to review the file "
+                                  "'final_report.md'; 2) fix every violation it reports by rewriting final_report.md (fix by removing or "
+                                  "marking claims as unverified, never by inventing data); 3) then present your final summary reflecting the REVIEWED report.")
+                    new_inputs = [current_input] if isinstance(current_input, str) else list(current_input)
+                    new_inputs.append(Message("user", [{"type": "text", "text": inject_msg}]))
+                    current_input = new_inputs
+
         tool_quotas_ctx.reset(token)
         self._is_agent_running = False
 
@@ -1226,11 +1270,12 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
                 if call_id:
                     sys.stdout.write(f"\n\033[93m[{agent_name}] Calling {name}...\033[0m\n")
             elif content.type == "function_result":
-                call_id = getattr(content, "call_id", None)
-                result = getattr(content, "result", "")
-                log_stream_content(agent_name, "function_result", {
-                    "call_id": call_id, "result": str(result)
-                })
+                            call_id = getattr(content, "call_id", None)
+                            result = getattr(content, "result", "")
+                            log_stream_content("Agent", "function_result", {
+                                "call_id": call_id, "result": str(result)
+                            })
+                            # Detect the draft report being written -> demand review immediately
 
     session_data = None
     if session_id:
@@ -1317,7 +1362,11 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
         current_input = prompt
         has_requests = True
         enforced_artifact_check = False
-        
+        enforced_review_check = False
+        report_just_written = False
+        review_rounds = 0
+        _MAX_REVIEW_ROUNDS = 2
+
         while has_requests:
             has_requests = False
             user_input_requests = []
@@ -1345,6 +1394,8 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
                             log_stream_content("Agent", "function_result", {
                                 "call_id": call_id, "result": str(result)
                             })
+                            if review_rounds < _MAX_REVIEW_ROUNDS and "final_report.md" in str(result):
+                                report_just_written = True
                 if getattr(update, "user_input_requests", None):
                     user_input_requests.extend(update.user_input_requests)
             except BaseException as e:
@@ -1387,6 +1438,50 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
                             current_input = new_inputs
                     except Exception as e:
                         pass
+
+            if not has_requests and not enforced_artifact_check:
+                req_artifact = config.cfg.get("settings", {}).get("workspace", {}).get("required_artifact", None)
+                if req_artifact:
+                    from tools.fs import get_workspace_files
+                    try:
+                        # get_workspace_files returns a list of filenames
+                        files = get_workspace_files()
+                        if req_artifact not in files:
+                            has_requests = True
+                            enforced_artifact_check = True
+                            
+                            warning_msg = f"\n\033[91m[System] WARNING: Required artifact '{req_artifact}' is missing from the workspace. Pushing agent to create it.\033[0m\n"
+                            sys.stdout.write(warning_msg)
+                            log_stream_content("Agent", "text", {"text": warning_msg})
+                            
+                            inject_msg = f"SYSTEM WARNING: You are attempting to finish the task, but the required final artifact '{req_artifact}' is missing from the workspace. You MUST create this file to successfully complete the task."
+                            
+                            new_inputs = [current_input] if isinstance(current_input, str) else list(current_input)
+                            new_inputs.append(Message("user", [{"type": "text", "text": inject_msg}]))
+                            current_input = new_inputs
+                    except Exception as e:
+                        pass
+
+            if report_just_written and review_rounds < _MAX_REVIEW_ROUNDS:
+                report_just_written = False
+                review_rounds += 1
+                has_requests = True
+                from tools.core import review_phase_ctx
+                review_phase_ctx.set(True)
+
+                warning_msg = f"\n\033[93m[System] Report written. Enforcing review (round {review_rounds} of {_MAX_REVIEW_ROUNDS}).\033[0m\n"
+                sys.stdout.write(warning_msg)
+
+                inject_msg = ("SYSTEM: You have just written final_report.md. Do NOT summarize or present results to the user yet. "
+                              "You MUST now: 1) call delegate_tasks with agent_id 'Reviewer' and instructions to review the file "
+                              "'final_report.md'; 2) fix every violation it reports by rewriting final_report.md (fix by removing or "
+                              "marking claims as unverified, never by inventing data); 3) only then present your final summary, which "
+                              "must reflect the REVIEWED report.")
+
+                new_inputs = [current_input] if isinstance(current_input, str) else list(current_input)
+                new_inputs.append(Message("user", [{"type": "text", "text": inject_msg}]))
+                current_input = new_inputs
+
                 
         _write_log()
         elapsed = datetime.now() - start_time

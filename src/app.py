@@ -17,6 +17,7 @@ from prompts import (
     ORCHESTRATOR_INSTRUCTIONS,
     SEARCH_SUBAGENT_INSTRUCTIONS,
     ANALYZER_SUBAGENT_INSTRUCTIONS,
+    REVIEWER_SUBAGENT_INSTRUCTIONS,
 )
 import config
 
@@ -42,14 +43,22 @@ searcher = SubAgentConfig(
     sub_agents=[analyzer]
 )
 
+# 2b. Leaf agent (Reviewer) — reads the draft report and returns integrity violations
+#     No sub_agents = leaf node. No web access. Reviews only what is written.
+reviewer = SubAgentConfig(
+    name="Reviewer",
+    instructions=REVIEWER_SUBAGENT_INSTRUCTIONS,
+    tools=[read_workspace_file, grep_workspace_file, think_tool]
+)
+
 # 3. Orchestrator — task management only, NO web, NO file reading
-#    sub_agents=[searcher] = can ONLY delegate to Searcher, cannot bypass to Analyzer
+#    sub_agents=[searcher, reviewer] = delegates research to Searcher, review to Reviewer
 app = AgentBuilder(
     name=config.APP_TITLE,
     description=config.APP_DESCRIPTION,
     instructions=ORCHESTRATOR_INSTRUCTIONS,
     tools=[write_workspace_file, list_workspace_files, write_todos, read_todos, think_tool],
-    sub_agents=[searcher]
+    sub_agents=[searcher, reviewer]
 )
 
 def cli_main():

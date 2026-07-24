@@ -1,6 +1,7 @@
 import os
 import asyncio
 import re
+import copy
 from agent_framework.openai import OpenAIChatCompletionClient
 from agent_framework import tool, AgentSession
 from tools import WORKSPACE_TOOLS, tool_quotas_ctx, with_quota, think_tool, QuotaAbortException
@@ -64,10 +65,16 @@ def _get_default_options():
     return options
 
 def _build_client():
-    return OpenAIChatCompletionClient(
+    from openai import AsyncOpenAI
+    import httpx
+    _async_client = AsyncOpenAI(
         base_url=config.cfg["api"]["openai_base_url"],
         api_key=os.getenv("OPENAI_API_KEY", "dummy"),
-        model=config.cfg["api"]["openai_model"]
+        timeout=httpx.Timeout(1800.0, connect=15.0, read=300.0)
+    )
+    return OpenAIChatCompletionClient(
+        model=config.cfg["api"]["openai_model"],
+        async_client=_async_client
     )
 
 def create_local_agent(builder, subagent_callback=None, session_data=None):
@@ -93,7 +100,7 @@ def create_local_agent(builder, subagent_callback=None, session_data=None):
 
     holds_token = contextvars.ContextVar('holds_token', default=False)
 
-    async def _run_single_task(task_name: str, instructions: str, agent_id: str = None) -> str:
+    async def _run_single_task(task_name: str, instructions: str, agent_id: str = None, web_calls_budget: int = None) -> str:
         async with sem:
             parent_depth = delegation_depth_ctx.get()
             depth_token = delegation_depth_ctx.set(parent_depth + 1)
@@ -124,7 +131,19 @@ def create_local_agent(builder, subagent_callback=None, session_data=None):
                 
                 # Scope the available sub-agents for the target agent's own delegate_tasks calls
                 children_token = available_sub_agents_ctx.set(target_children)
-                    
+
+                # Per-task web_calls budget: give this task its own quota context
+                # seeded with its allocated share, so tasks don't share one global pool.
+                quota_token = None
+                if web_calls_budget is not None:
+                    _parent_quota = tool_quotas_ctx.get()
+                    if _parent_quota and "web_calls" in _parent_quota:
+                        _task_quota = copy.deepcopy(_parent_quota)
+                        _task_quota["web_calls"]["limit"] = web_calls_budget
+                        _task_quota["web_calls"]["used"] = 0
+                        _task_quota["web_calls"].pop("rules", None)
+                        quota_token = tool_quotas_ctx.set(_task_quota)
+
                 sub_instr = ""
                 if target_config:
                     sub_instr = _safe_format(
@@ -174,7 +193,20 @@ def create_local_agent(builder, subagent_callback=None, session_data=None):
                             if getattr(update, "user_input_requests", None):
                                 user_input_requests.extend(update.user_input_requests)
                     except QuotaAbortException as e:
-                        return f"## Error for {task_name}\nTask forcefully aborted: {str(e)}\n---"
+                        from tools.fs import get_workspace_files
+                        try:
+                            _files = get_workspace_files()
+                        except Exception:
+                            _files = []
+                        _salvage = f"## Partial result for {task_name}\n"
+                        _salvage += f"(Task hit a quota limit and was stopped before returning a summary: {str(e)})\n\n"
+                        if final_text.strip():
+                            _salvage += f"### Findings gathered before stopping:\n{final_text}\n\n"
+                        if _files:
+                            _salvage += "### Files already fetched to the workspace — delegate an Analyzer to read these for content:\n"
+                            _salvage += "\n".join(f"- {f}" for f in _files) + "\n"
+                        _salvage += "---"
+                        return _salvage
                             
                     if user_input_requests:
                         has_requests = True
@@ -192,6 +224,8 @@ def create_local_agent(builder, subagent_callback=None, session_data=None):
 
                 return f"## Result for {task_name}\n{final_text}\n---"
             finally:
+                if quota_token is not None:
+                    tool_quotas_ctx.reset(quota_token)
                 available_sub_agents_ctx.reset(children_token)
                 holds_token.reset(token_setter)
                 delegation_depth_ctx.reset(depth_token)
@@ -206,12 +240,33 @@ def create_local_agent(builder, subagent_callback=None, session_data=None):
     @tool(name="delegate_tasks", description="Delegate multiple independent tasks to specialized sub-agents to be executed concurrently. Pass a list of dictionaries, each with 'task_name', 'instructions', and optionally 'agent_id'.")
     @with_quota
     async def delegate_tasks(tasks: list[dict]) -> str:
+        # Step A: Compute per-task web_calls allocation
+        _wc = config.cfg.get("settings", {}).get("quotas", {}).get("web_calls", {})
+        global_budget = _wc.get("limit", 100) - _wc.get("rules", {}).get("reserve", 0)
+        allocation_settings = config.cfg.get("settings", {}).get("allocation", {})
+        flatness_constant = allocation_settings.get("flatness_constant", 7)
+        floor = allocation_settings.get("floor", 6)
+
+        N = len(tasks)
+        # Compute weights: W_i = (N - i) + flatness_constant for 0-based index i
+        weights = [(N - i) + flatness_constant for i in range(N)]
+        sum_weights = sum(weights)
+
+        # Compute shares: floor_weighted proportion of budget, with minimum floor
+        task_shares = []
+        for i in range(N):
+            weight = weights[i]
+            share = int(weight / sum_weights * global_budget)
+            share = max(floor, share)
+            task_shares.append(share)
+
         coroutines = []
-        for t in tasks:
+        for idx, t in enumerate(tasks):
             name = t.get("task_name", "Unknown_Task")
             instr = t.get("instructions", "")
             aid = t.get("agent_id", None)
-            coroutines.append(_run_single_task(name, instr, aid))
+            web_calls_budget = task_shares[idx]
+            coroutines.append(_run_single_task(name, instr, aid, web_calls_budget))
             
         was_holding = holds_token.get()
         if was_holding:
