@@ -1,6 +1,6 @@
 # Deep Research Agent
 
-A hierarchical deep research agent built with the **Microsoft Agent Framework** and **Textual** TUI. Uses a strict 3-tier delegation chain: **Orchestrator → Searcher → Analyzer** to perform web-based research and document analysis while keeping context windows lean for local LLMs.
+A hierarchical deep research agent built with the **Microsoft Agent Framework** and **Textual** TUI. Uses a strict delegation chain — **Orchestrator → Searcher → Analyzer** for research, plus a post-research **Reviewer** — to perform web-based research and document analysis while keeping context windows lean for local LLMs.
 
 ## Architecture
 
@@ -13,28 +13,28 @@ A hierarchical deep research agent built with the **Microsoft Agent Framework** 
 |        write_todos, read_todos,   |
 |        think_tool, delegate_tasks |
 | No web or file reading tools.     |
-+-----------------+-----------------+
-                  | delegates to
-                  v
-       +--------------------+
-       |   Searcher         |
-       |--------------------|
-       | Tools: web_search, |
-       |        fetch_url,  |
-       |        think_tool, |
-       |        delegate    |
-       | No file reading.   |
-       +--------+-----------+
-                | delegates to
-                v
-       +--------------------+
-       |   Analyzer (Leaf)  |
-       |--------------------|
-       | Tools: read_file,  |
-       |        grep_file,  |
-       |        think_tool  |
-       | No web, no delegate.|
-       +--------------------+
++--------+----------------+---------+
+         | delegates to   | delegates to (Phase 3)
+         v                v
++--------------------+   +--------------------+
+|   Searcher         |   |   Reviewer (Leaf)  |
+|--------------------|   |--------------------|
+| Tools: web_search, |   | Tools: read_file,  |
+|        fetch_url,  |   |        grep_file,  |
+|        think_tool, |   |        think_tool  |
+|        delegate    |   | No web, no delegate.|
+| No file reading.   |   | Reviews the draft; |
++--------+-----------+   | flags concerns back |
+         | delegates to  | to the Orchestrator.|
+         v               +--------------------+
++--------------------+
+|   Analyzer (Leaf)  |
+|--------------------|
+| Tools: read_file,  |
+|        grep_file,  |
+|        think_tool  |
+| No web, no delegate.|
++--------------------+
 ```
 
 ### Delegation Chain & Tool Separation
@@ -42,8 +42,18 @@ A hierarchical deep research agent built with the **Microsoft Agent Framework** 
 - **Orchestrator**: Plans research, dispatches Searchers, synthesizes `final_report.md`. Has NO web tools and NO file reading tools. Delegates ONLY to the Searcher.
 - **Searcher**: Searches the web, fetches URLs to the workspace. Has NO file reading tools — forced to delegate to the Analyzer. Delegates ONLY to the Analyzer.
 - **Analyzer**: Reads and extracts data from downloaded files. Has NO web tools and NO delegation capability. Leaf node.
+- **Reviewer**: Fact-checks the draft report in a dedicated review phase (Phase 3). Has only `read_workspace_file`, `grep_workspace_file`, and `think_tool` — NO web tools and NO delegation. Leaf node. Returns a numbered list of integrity concerns (or `REVIEW PASSED`); it does not research or rewrite. The Orchestrator owns any corrective research and the final report.
 
 This separation prevents any single agent from bloating its context window with raw web content.
+
+### Review & Report Finalisation (Phase 3)
+
+After research completes, the Orchestrator writes a draft report and runs a review-and-correct loop before finalising:
+
+1. **Draft.** The Orchestrator writes `report_draft.md`.
+2. **Review.** It delegates the draft to the Reviewer, which returns integrity concerns (or `REVIEW PASSED`). The Reviewer never researches, rewrites, or calls Searchers.
+3. **Corrective research.** For material, quickly-fixable concerns, the Orchestrator runs a single bounded corrective pass via the Searcher, spending from the reserved budget. Concerns that cannot be quickly resolved stay as honest gaps; data is never invented to satisfy a concern.
+4. **Final report.** The Orchestrator writes `final_report.md` as a fresh file, always — even on a clean `REVIEW PASSED`. `report_draft.md` is left in place, so the draft/final pair gives traceability of exactly what review changed.
 
 ### Proportional Search Depth
 
@@ -95,18 +105,29 @@ OPENAI_MODEL=local-model
 
 On first run, the config is auto-created at `~/.deep-research-agent/config.yaml` from `src/config_template.yaml`. Key settings:
 
+> **Note:** `web_search` and `fetch_url_to_workspace` no longer have separate quotas. They now draw from a single unified `web_calls` pool, allocated per-task by weight (`allocation`), with a `reserve` held back for the Phase 3 corrective pass.
+
 ```yaml
 settings:
   concurrency:
     max_concurrent_tasks: 3    # Max parallel sub-agent execution
+  allocation:                  # Weighted per-task budget allocation
+    flatness_constant: 7       # Higher = more even split across tasks
+    floor: 6                   # Minimum web_calls guaranteed per task
   quotas:                      # Global tool call limits
-    web_search: 15
-    fetch_url_to_workspace: 10
-    delegate_tasks: 10
+    web_calls:                 # Unified search + fetch budget (shared pool)
+      limit: 150
+      reserve: 10              # Held back for post-review corrective research
+    delegate_tasks: 40
+    think_tool: 60
     read_workspace_file:
-      limit: 60
+      limit: 100
       rules:
         max_lines: 400
+    grep_workspace_file:
+      limit: 100
+  fast_test:
+    enabled: false             # Reduced quotas for quick smoke tests
   workspace:
     type: disk                 # "memory" or "disk"
     session_isolation: true    # Timestamped run folders
@@ -136,8 +157,8 @@ python src/app.py --prompt "Compare the AI research strategies of OpenAI, Google
 
 | Tool | Description |
 |------|-------------|
-| `web_search` | DuckDuckGo search (no API key needed) |
-| `fetch_url_to_workspace` | Fetch URLs → parse to Markdown → save to workspace |
+| `web_search` | DuckDuckGo search (no API key needed) — charges the unified `web_calls` pool |
+| `fetch_url_to_workspace` | Fetch URLs → parse to Markdown → save to workspace — charges the unified `web_calls` pool |
 | `read_workspace_file` | Read files with line-range chunking |
 | `grep_workspace_file` | Regex search within workspace files |
 | `write_workspace_file` | Write files to workspace |
@@ -145,6 +166,8 @@ python src/app.py --prompt "Compare the AI research strategies of OpenAI, Google
 | `write_todos` / `read_todos` | Markdown checkbox task tracking |
 | `think_tool` | Forced reflection pause for structured reasoning |
 | `delegate_tasks` | Auto-injected for agents with children |
+
+Report artifacts: `report_draft.md` (written after research, before review) and `final_report.md` (written after review and any corrective fixes). Both persist for traceability.
 
 ## Security
 
