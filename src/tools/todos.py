@@ -34,6 +34,15 @@ def write_todos(todos: str) -> str:
                 f.write(todos)
         else:
             _IN_MEMORY_FS[path] = todos
+        # Clear the read-repeat guard: the list has changed, so the next
+        # read_todos should be served rather than refused.
+        try:
+            from tools.core import tool_quotas_ctx
+            _ctx = tool_quotas_ctx.get()
+            if isinstance(_ctx, dict):
+                _ctx.pop("_last_todos_read", None)
+        except Exception:
+            pass
         return "Todos saved successfully."
     except Exception as e:
         import traceback
@@ -49,9 +58,26 @@ def read_todos() -> str:
     """
     try:
         content = get_workspace_file_content("_todos.md")
-        if content:
-            return content
-        return "No todos have been saved yet."
+        if not content:
+            return "No todos have been saved yet."
+        # Refuse a repeat read that would return the exact same list as the
+        # previous read, with no write_todos in between. Re-reading an unchanged
+        # list yields nothing new and is a common orchestrator stall (observed:
+        # 28 consecutive identical read_todos calls in session_5f93c431). The
+        # list only changes when write_todos is called, so an unchanged repeat
+        # means the agent must ACT on a todo, not read it again.
+        from tools.core import tool_quotas_ctx
+        _ctx = tool_quotas_ctx.get()
+        if isinstance(_ctx, dict):
+            _last = _ctx.get("_last_todos_read")
+            if _last is not None and _last == content:
+                return ("Error: The todo list has NOT changed since you last read it "
+                        "and no write_todos was called in between. Re-reading it gives "
+                        "you nothing new. You MUST now EXECUTE the next unchecked todo — "
+                        "delegate a task, or write the final report — rather than reading "
+                        "the list again.")
+            _ctx["_last_todos_read"] = content
+        return content
     except Exception as e:
         import traceback
         return f"Error: {e}\n\nTraceback:\n{traceback.format_exc()}"
