@@ -12,7 +12,7 @@ def _get_config_path_from_args():
 # --- APPLICATION IDENTITY ---
 APP_NAME = "deep-research-agent"          # Used for config/log folders
 APP_TITLE = "Deep Research Agent"         # Used for UI branding
-APP_DESCRIPTION = "Hierarchical research agent: Orchestrator → Searcher → Analyzer"
+APP_DESCRIPTION = "Hierarchical research agent: Orchestrator → Searcher → Analyzer, with post-research Reviewer"
 
 _DEFAULT_CONFIG_DIR = os.path.expanduser(f"~/.{APP_NAME}")
 _CONFIG_PATH = _get_config_path_from_args() or os.path.join(_DEFAULT_CONFIG_DIR, "config.yaml")
