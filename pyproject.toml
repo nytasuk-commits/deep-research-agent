@@ -10,7 +10,7 @@ authors = [{name = "Local Agent Builder"}]
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "agent-framework",
+    "agent-framework",  # last known good: 1.12.1 (2026-07-25), validated by session_8cc460f9. 1.11.0 had a streaming telemetry contextvar bug ("Token ... created in a different Context") that silently broke sub-agent delegation; fixed upstream by 1.12.1 (PRs #6764, #6709). If a future version regresses, pin to ==1.12.1.
     "python-dotenv",
     "httpx",
     "truststore",
