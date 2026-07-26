@@ -3,6 +3,10 @@ api:
   openai_model: local-model
 settings:
   enable_thinking: false
+  # Max number of enforced review rounds after the final report is written.
+  # Each round: Reviewer checks the report, Orchestrator fixes violations by
+  # editing the report text. Capped to guarantee termination. 2 is recommended.
+  max_review_rounds: 2
   concurrency:
     max_concurrent_tasks: 3
   quotas:

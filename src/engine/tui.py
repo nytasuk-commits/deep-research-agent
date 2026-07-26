@@ -1108,8 +1108,12 @@ class BasicTuiAgent(App):
                     self._safe_scroll_end(chat)
                     inject_msg = ("SYSTEM: You have written final_report.md but it has not been reviewed. Do NOT present results as final. "
                                   "You MUST now: 1) call delegate_tasks with agent_id 'Reviewer' and instructions to review the file "
-                                  "'final_report.md'; 2) fix every violation it reports by rewriting final_report.md (fix by removing or "
-                                  "marking claims as unverified, never by inventing data); 3) then present your final summary reflecting the REVIEWED report.")
+                                  "'final_report.md'; 2) fix every violation it reports by EDITING THE EXISTING final_report.md TEXT ONLY. "
+                                  "At this review stage you MUST NOT launch any new research: do NOT call web_search, do NOT fetch URLs, and "
+                                  "do NOT delegate research/search/verify tasks to any agent other than the Reviewer. If the Reviewer flags "
+                                  "a figure as unsourced or undated and you cannot source it from material ALREADY in the workspace, you MUST "
+                                  "fix it by removing it or marking it unverified — never by researching it again and never by inventing data. "
+                                  "3) then present your final summary reflecting the REVIEWED report.")
                     new_inputs = [current_input] if isinstance(current_input, str) else list(current_input)
                     new_inputs.append(Message("user", [{"type": "text", "text": inject_msg}]))
                     current_input = new_inputs
@@ -1365,7 +1369,7 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
         enforced_review_check = False
         report_just_written = False
         review_rounds = 0
-        _MAX_REVIEW_ROUNDS = 2
+        _MAX_REVIEW_ROUNDS = config.cfg["settings"].get("max_review_rounds", 2)
 
         while has_requests:
             has_requests = False
@@ -1474,9 +1478,12 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
 
                 inject_msg = ("SYSTEM: You have just written final_report.md. Do NOT summarize or present results to the user yet. "
                               "You MUST now: 1) call delegate_tasks with agent_id 'Reviewer' and instructions to review the file "
-                              "'final_report.md'; 2) fix every violation it reports by rewriting final_report.md (fix by removing or "
-                              "marking claims as unverified, never by inventing data); 3) only then present your final summary, which "
-                              "must reflect the REVIEWED report.")
+                              "'final_report.md'; 2) fix every violation it reports by EDITING THE EXISTING final_report.md TEXT ONLY. "
+                              "At this review stage you MUST NOT launch any new research: do NOT call web_search, do NOT fetch URLs, and "
+                              "do NOT delegate research/search/verify tasks to any agent other than the Reviewer. If the Reviewer flags "
+                              "a figure as unsourced or undated and you cannot source it from material ALREADY in the workspace, you MUST "
+                              "fix it by removing it or marking it unverified — never by researching it again and never by inventing data. "
+                              "3) only then present your final summary, which must reflect the REVIEWED report.")
 
                 new_inputs = [current_input] if isinstance(current_input, str) else list(current_input)
                 new_inputs.append(Message("user", [{"type": "text", "text": inject_msg}]))
