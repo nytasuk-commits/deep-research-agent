@@ -105,32 +105,59 @@ OPENAI_MODEL=local-model
 
 On first run, the config is auto-created at `~/.deep-research-agent/config.yaml` from `src/config_template.yaml`. Key settings:
 
-> **Note:** `web_search` and `fetch_url_to_workspace` no longer have separate quotas. They now draw from a single unified `web_calls` pool, allocated per-task by weight (`allocation`), with a `reserve` held back for the Phase 3 corrective pass.
+> **Note:** `web_search` and `fetch_url_to_workspace` no longer have separate quotas. They draw from a single unified `web_calls` pool, allocated per-task by weight (`allocation`), with `reserve` (under `web_calls.rules`) held back for the Phase 3 corrective pass. Quotas are GLOBAL — shared across all agents — and each key must be unique.
 
 ```yaml
 settings:
+  enable_thinking: false         # LLM reasoning traces on/off
+  max_review_rounds: 2           # Max enforced review rounds after the final report
+                                 # (Reviewer checks, Orchestrator fixes). Capped to
+                                 # guarantee termination. 2 recommended.
   concurrency:
-    max_concurrent_tasks: 3    # Max parallel sub-agent execution
-  allocation:                  # Weighted per-task budget allocation
-    flatness_constant: 7       # Higher = more even split across tasks
-    floor: 6                   # Minimum web_calls guaranteed per task
-  quotas:                      # Global tool call limits
-    web_calls:                 # Unified search + fetch budget (shared pool)
-      limit: 150
-      reserve: 10              # Held back for post-review corrective research
-    delegate_tasks: 40
-    think_tool: 60
-    read_workspace_file:
+    max_concurrent_tasks: 3      # Max parallel sub-agent execution
+  quotas:                        # Global tool call limits (shared across ALL agents)
+    delegate_tasks: 20
+    web_calls:                   # Unified search + fetch budget (shared pool)
       limit: 100
       rules:
-        max_lines: 400
+        reserve: 10              # Held back for post-review corrective research
+    write_workspace_file: 20
+    write_todos: 30
+    read_todos: 30
+    think_tool: 30
+    read_workspace_file:
+      limit: 60
+      rules:
+        max_lines: 400           # Per-read line-slice cap
     grep_workspace_file:
-      limit: 100
+      limit: 60
+      rules:
+        max_matches: 15          # Max matches returned per grep
+    list_workspace_files: 20
   fast_test:
-    enabled: false             # Reduced quotas for quick smoke tests
+    enabled: false               # Reduced quotas for quick smoke tests
+    overrides:                   # Applied only when fast_test.enabled is true
+      concurrency:
+        max_concurrent_tasks: 1
+      quotas:
+        web_calls:
+          limit: 30
+        delegate_tasks: 12
+        read_workspace_file:
+          limit: 15
+        grep_workspace_file:
+          limit: 15
+        write_workspace_file: 5
+  allocation:                    # Weighted per-task web_calls allocation
+    flatness_constant: 7         # Higher = more even split across tasks
+    floor: 6                     # Minimum web_calls guaranteed per task
+  enable_conversational_memory: true
+  enable_session_persistence: true
   workspace:
-    type: disk                 # "memory" or "disk"
-    session_isolation: true    # Timestamped run folders
+    type: disk                   # "memory" or "disk"
+    dir: "~/.{APP_NAME}/workspace"
+    session_isolation: true      # Timestamped run folders (e.g. run_1748192400/)
+    required_artifact: "final_report.md"
 ```
 
 ### 4. Run the TUI
