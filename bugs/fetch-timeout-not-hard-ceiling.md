@@ -1,6 +1,6 @@
 # Fetch Timeout Not a Hard Ceiling
 
-**Status:** Open
+**Status:** Tracking (fix committed, awaiting live confirmation)
 **Type:** Bug
 **Source:** Spec item 5
 

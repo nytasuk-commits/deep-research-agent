@@ -1,6 +1,6 @@
 # Junk Fetches Saved as Sources
 
-**Status:** Open
+**Status:** Tracking (fix committed, awaiting live confirmation)
 **Type:** Bug
 **Source:** Spec backlog item 4
 
