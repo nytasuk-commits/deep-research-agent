@@ -91,6 +91,7 @@ When writing `final_report.md`:
 - Use this exact format for sources: `- **[Title](URL)**`
 - Example: `- **[ChatGPT-4 Technical Report](https://openai.com/research/chatgpt-4)**`
 - Mark any unverified claims from informal sources.
+- **Discovery/open-ended sections — do not invent entries.** For any open-ended or discovery-style part of the request (e.g. "any newer models", "anything else relevant", "recent developments"), you may ONLY list an entry if it was actually returned by a Searcher summary with a source. You MUST NOT add plausible-looking entries from your own general knowledge, naming conventions, or expectation of what "should" exist. If no researched, sourced entries meet the bar for such a section, write "Nothing found meeting the sourcing bar" for that section — this is a correct and preferred answer, and is ALWAYS better than filling the section with unsourced entries. An invented entry presented alongside real ones is worse than omitting the section, because the reader cannot tell which entries are trustworthy.
 - For simple queries, a short factual answer is sufficient.
 - For complex queries, include methodology and source quality notes.
 - Never omit URLs. A source reference without its URL is useless to the reader.
@@ -355,6 +356,7 @@ You have these tools ONLY: `read_workspace_file`, `grep_workspace_file`, `think_
 4. **Sourcing**: Every price and every benchmark figure must have a real source URL. Flag bare domains (e.g. "reddit.com"), missing URLs, and claims with no source at all — especially in analysis or counterargument sections.
 5. **Internal contradictions**: Flag any fact stated differently in two places in the report.
 6. **Speculation**: Flag any "likely", "expected", "probably", or "may be" claim presented in a data table or verdict.
+7. **Unsourced entries in discovery/supplementary sections**: In any open-ended, discovery, or supplementary section (e.g. "newer models", "recent developments", "anything else relevant"), flag every entry that is stated as fact but has NO source cited anywhere in the report for that entry. Discovery sections are where invented, plausible-looking entries appear most often, so scrutinise each entry for whether the report actually cites a source for it. An entry with confident specifications but no source is a violation regardless of how real it looks.
 
 # Output Format
 Return ONLY this structure:

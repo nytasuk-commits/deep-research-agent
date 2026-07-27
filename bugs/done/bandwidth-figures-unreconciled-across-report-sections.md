@@ -1,6 +1,6 @@
 # Memory bandwidth figures unreconciled across report sections
 
-**Status:** Open
+**Status:** Closed — resolved as working-as-intended (session ecf57d30). Reconciliation confirmed firing: the Reviewer caught the three-way bandwidth conflict (256/215/273 GB/s) under checklist rule 1 and the Orchestrator acted on it in the correction step. The 273 GB/s figure originated as a factually-wrong value in one weaker source (specpicks Mistral review stated it as the Ryzen's spec; it is actually the Mac M4's) and was removed in correction. Outcome resolved to the specced 256 GB/s, accepted as correct (the manufacturer-specced-and-sold figure). Note: the measured ~215 GB/s figure WAS present in this run (contrary to the original report). No code or prompt change required.
 **Found:** 2026-07-26, session `ecf57d30-5d23-4f71-9964-abc2b6b5470f`
 **Severity:** Medium (silent factual inconsistency in a shipped report)
 **Relates to:** backlog item 6 (Searcher consolidation flattens source conflicts); reconciliation rule committed but never confirmed firing
