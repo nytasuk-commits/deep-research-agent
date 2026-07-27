@@ -16,3 +16,15 @@
 - Keep the injected text trivial/configurable; it only needs to trigger one round-trip.
 
 **This is a WORKAROUND, not a fix.** The underlying malform is root-caused to the Qwen XML chat template not being stream-parsed by LM Studio. The real fix is the non-streaming rework (Path B), tracked in `bugs/simple-query-tool-call-malform.md`. This item only hides the manual priming step; it does not resolve the malform.
+
+---
+
+## RESOLVED — commit `f7e1de7`
+
+Auto-primer implemented and validated. On session start the app sends a throwaway "Hello" as a real user turn through the full model round-trip; the injected "Hello" is suppressed from the TUI transcript while the agent's greeting is rendered, so the user sees the agent ready before typing.
+
+**Validation:** On a fresh session the greeting appeared unprompted (no manual priming typed), and the user's subsequent first real query produced a well-formed tool-call stream. This confirms the open risk noted above — a suppressed-but-real turn DOES warm the stream the same way a visible manual turn does. All acceptance criteria met.
+
+**Scope of closure:** This closes the WORKAROUND only. The underlying tool-call malform (Qwen XML chat template not stream-parsed by LM Studio) is NOT fixed by this item; the root fix (Path B non-streaming rework) remains open in `bugs/simple-query-tool-call-malform.md`.
+
+**Unexpected benefit (feature, not just fix):** Because the auto-primer runs the full model round-trip on startup, the greeting doubles as a live readiness check — the pipeline self-tests on launch. If the model is unloaded, the endpoint is down, or the model is in a degenerate state (e.g. the `?`-collapse seen with bad saved settings or a broken LM Studio build), it shows up in the greeting immediately, before the user spends a real query on it. The model prompting the user is itself confirmation the stream is warm and the chain works end-to-end.
