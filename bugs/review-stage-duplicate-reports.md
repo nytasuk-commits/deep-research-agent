@@ -1,6 +1,6 @@
 # Review Stage Produces Byte-Identical Duplicate Reports
 
-**Status:** Open
+**Status:** Downgraded — not reproduced on session ecf57d30. That run produced a single final_report.md, written twice (pre- and post-review) with substantive changes on the second write, and no _summary/_reviewed variant files. Confirms the review updates the existing report in place rather than saving byte-identical copies under new names. Re-open if duplicate/variant report files recur.
 **Type:** Bug
 **Source:** Observed in run
 
