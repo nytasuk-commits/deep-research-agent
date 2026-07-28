@@ -1015,15 +1015,13 @@ class BasicTuiAgent(App):
 
 
             except QuotaAbortException as e:
-                # The loop-breaker (_check_repeat / check_quota) raises QuotaAbortException,
-                # which subclasses BaseException — NOT Exception — so the `except Exception`
-                # below cannot catch it. Without this handler the exception propagates
-                # uncaught out of the `async for`, the worker task dies "never retrieved",
-                # and the TUI spinner hangs forever (observed: identical-consecutive
-                # write_workspace_file and read_todos calls each producing multi-hour hangs).
-                # The CLI loop and the sub-agent loop already handle this exception; this
-                # mirrors that handling onto the interactive TUI loop. Clear the spinner,
-                # report the abort, and end the turn cleanly.
+                # Stop any tool-call spinner left running when the abort fired. The
+                # loop-breaker raises mid tool call, so that call's spinner never
+                # receives its completion event and would otherwise keep counting up
+                # forever, making a cleanly-aborted turn look like it is still running.
+                for _cw in state.get("calls", {}).values():
+                    if not getattr(_cw, "_done", False):
+                        _cw.mark_stopped()
                 p_widget = state.get("processing_widget")
                 if p_widget:
                     p_widget.mark_error(f"Aborted: {str(e)}")
