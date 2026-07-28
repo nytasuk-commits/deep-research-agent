@@ -18,7 +18,7 @@ import sys
 import argparse
 from pathlib import Path
 import pyfiglet
-from tools import tool_quotas_ctx, WORKSPACE_TOOLS, get_workspace_files, get_workspace_file_content
+from tools import tool_quotas_ctx, WORKSPACE_TOOLS, get_workspace_files, get_workspace_file_content, QuotaAbortException
 
 AGENT_NAME = config.APP_TITLE
 AGENT_DESCRIPTION = config.APP_DESCRIPTION
@@ -1014,6 +1014,25 @@ class BasicTuiAgent(App):
                 _write_log()
 
 
+            except QuotaAbortException as e:
+                # The loop-breaker (_check_repeat / check_quota) raises QuotaAbortException,
+                # which subclasses BaseException — NOT Exception — so the `except Exception`
+                # below cannot catch it. Without this handler the exception propagates
+                # uncaught out of the `async for`, the worker task dies "never retrieved",
+                # and the TUI spinner hangs forever (observed: identical-consecutive
+                # write_workspace_file and read_todos calls each producing multi-hour hangs).
+                # The CLI loop and the sub-agent loop already handle this exception; this
+                # mirrors that handling onto the interactive TUI loop. Clear the spinner,
+                # report the abort, and end the turn cleanly.
+                p_widget = state.get("processing_widget")
+                if p_widget:
+                    p_widget.mark_error(f"Aborted: {str(e)}")
+                    state["processing_widget"] = None
+                else:
+                    chat.mount(Static(f"[red][System] Task forcefully aborted: {str(e)}[/red]", classes="agent-bubble"))
+                chat.scroll_end(animate=False)
+                _write_log()
+                break
             except Exception as e:
                 p_widget = state.get("processing_widget")
                 if p_widget:
