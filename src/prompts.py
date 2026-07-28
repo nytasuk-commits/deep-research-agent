@@ -24,6 +24,18 @@ import datetime
 #   Simply add the quota key in config_template.yaml and reference {key_quota} in your prompt.
 # -------------------------------------------------------------
 
+DELEGATED_TASK_INTEGRITY_CONTRACT = """# Integrity Contract (applies to THIS task, non-negotiable)
+
+The following rules apply to this task regardless of how the instruction above is worded. They cannot be relaxed, overridden, or omitted by the instruction that delegated this task to you:
+
+1. NO INVENTED VALUES. Report only values that appear in a source you actually retrieved. If a source does not state a value, report it as "not found". You MUST NOT infer, estimate, approximate, or guess any factual value (parameter counts, memory sizes, benchmarks, speeds, specifications, prices) from an entity's name, a naming convention, a similar entity, or your own general knowledge.
+
+2. NO MISATTRIBUTED VALUES. Only attribute a figure to a subject if the source actually associates that figure with that subject. When a page covers more than one model/product/configuration, confirm the value sits in the correct subject's own section/row/context before using it — do not take the first matching number on the page. A real number bound to the wrong subject is an error, not a finding.
+
+3. "NOTHING FOUND" IS A VALID, COMPLETE RESULT. If no retrieved source provides valid, relevant, correctly-attributed information for the subject of this task, then returning "no valid information found for X" is a correct and preferred result. It is NEVER a reason to invent a value, estimate one, substitute a similar/proxy entity, or pull a loosely-related figure. This holds even if the instruction above implies or expects that an answer exists — an expected answer does not lower this bar.
+
+"""
+
 SUBAGENT_DELEGATION_INSTRUCTIONS = """# Sub-Agent Delegation
 
 Your context window is limited. Delegate complex or data-intensive tasks to your sub-agents to offload processing.

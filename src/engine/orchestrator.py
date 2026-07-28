@@ -5,7 +5,7 @@ import copy
 from agent_framework.openai import OpenAIChatCompletionClient
 from agent_framework import tool, AgentSession
 from tools import WORKSPACE_TOOLS, tool_quotas_ctx, with_quota, think_tool, QuotaAbortException
-from prompts import ORCHESTRATOR_INSTRUCTIONS, SUBAGENT_INSTRUCTIONS, SUBAGENT_DELEGATION_INSTRUCTIONS
+from prompts import ORCHESTRATOR_INSTRUCTIONS, SUBAGENT_INSTRUCTIONS, SUBAGENT_DELEGATION_INSTRUCTIONS, DELEGATED_TASK_INTEGRITY_CONTRACT
 import datetime
 import config
 import contextvars
@@ -175,7 +175,11 @@ def create_local_agent(builder, subagent_callback=None, session_data=None):
                     default_options=_get_default_options()
                 )
                 final_text = ""
-                current_input = instructions
+                # Mechanically prepend the integrity contract to EVERY delegated task,
+                # so an agent-initiated call carries the same non-negotiable integrity
+                # rules as a code-initiated one. The delegating agent cannot omit or
+                # weaken this — it is attached here by the spawner, not by the caller.
+                current_input = DELEGATED_TASK_INTEGRITY_CONTRACT + "\n---\n\n# Your task\n\n" + instructions
                 has_requests = True
                 while has_requests:
                     has_requests = False
