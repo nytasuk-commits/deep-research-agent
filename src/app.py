@@ -57,7 +57,7 @@ app = AgentBuilder(
     name=config.APP_TITLE,
     description=config.APP_DESCRIPTION,
     instructions=ORCHESTRATOR_INSTRUCTIONS,
-    tools=[write_workspace_file, list_workspace_files, write_todos, read_todos, think_tool],
+    tools=[read_workspace_file, write_workspace_file, list_workspace_files, write_todos, read_todos, think_tool],
     sub_agents=[searcher, reviewer]
 )
 
