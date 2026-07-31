@@ -84,10 +84,12 @@ def load_config() -> dict:
             cfg["settings"] = _deep_merge(cfg["settings"], overrides)
             print("[config] FAST-TEST MODE ACTIVE — quotas reduced", file=sys.stderr)
 
-    # Overlay API keys from environment if set (env takes priority for secrets)
-    if os.environ.get("OPENAI_API_BASE"):
+    # Overlay API keys from environment if set.
+    # Env vars are used ONLY if the corresponding value in config is still at its default.
+    # This makes config.yaml the primary source, with env vars as fallbacks for unset values.
+    if os.environ.get("OPENAI_API_BASE") and cfg["api"]["openai_base_url"] == _DEFAULTS["api"]["openai_base_url"]:
         cfg["api"]["openai_base_url"] = os.environ["OPENAI_API_BASE"]
-    if os.environ.get("OPENAI_MODEL"):
+    if os.environ.get("OPENAI_MODEL") and cfg["api"]["openai_model"] == _DEFAULTS["api"]["openai_model"]:
         cfg["api"]["openai_model"] = os.environ["OPENAI_MODEL"]
 
     return cfg
