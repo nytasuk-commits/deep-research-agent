@@ -97,6 +97,24 @@ _BACKOFF: Tuple[int, ...] = (10, 30, 60, 60, 60, 60)
 _MAX_FAILS = 6
 
 
+def _short_reason(exc: BaseException, limit: int = 160) -> str:
+    """One-line, length-capped description of a failure.
+
+    Endpoint errors can carry an entire HTML error page as their string
+    form. Collapse to a single line and cap the length so the log stays
+    readable and the TUI message stays meaningful. Always include the
+    exception type, since a truncated body alone can be uninformative.
+    """
+    raw = str(exc).strip()
+    # collapse all whitespace (including newlines) to single spaces
+    raw = " ".join(raw.split())
+    if not raw:
+        raw = "no detail"
+    if len(raw) > limit:
+        raw = raw[:limit].rstrip() + "..."
+    return f"{type(exc).__name__}: {raw}"
+
+
 class _EndpointState:
     """
     Holds the state for a single endpoint URL.
@@ -244,13 +262,13 @@ class EndpointRouter:
                 if state.fail_count >= _MAX_FAILS:
                     state.permanently_down = True
                     self._logger.info(
-                        f"[{state.url}] PRIME FAILED permanently: {e}"
+                        f"[{state.url}] PRIME FAILED permanently: {_short_reason(e)}"
                     )
                 else:
                     # Set next_probe_at from backoff schedule
                     idx = min(state.fail_count - 1, len(_BACKOFF) - 1)
                     state.next_probe_at = time.monotonic() + _BACKOFF[idx]
-                msg = f"[{state.url}] PRIME FAILED — excluded from this query: {e}"
+                msg = f"[{state.url}] PRIME FAILED — excluded from this query: {_short_reason(e)}"
                 return msg
 
         # Gather priming tasks for unprimed candidates
@@ -268,7 +286,7 @@ class EndpointRouter:
             for i, ((state, task), result) in enumerate(zip(tasks_to_prime, results)):
                 # Handle exceptions from gather
                 if isinstance(result, Exception):
-                    msg = f"[{state.url}] PRIME FAILED — excluded from this query: {result}"
+                    msg = f"[{state.url}] PRIME FAILED — excluded from this query: {_short_reason(result)}"
                 else:
                     msg = result
                 if msg is not None:
