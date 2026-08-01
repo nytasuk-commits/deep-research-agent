@@ -1,0 +1,502 @@
+"""
+Multi-endpoint LLM router for deep-research-agent.
+
+Routes requests across multiple endpoints, tracking health and enforcing
+per-endpoint concurrency limits. Health snapshots are taken at query start;
+no mid-query rebalancing occurs.
+"""
+
+import asyncio
+import os
+import time
+import logging
+import contextlib
+import pathlib
+from typing import Optional, List, Tuple
+
+import httpx
+
+import config
+from agent_framework.openai import OpenAIChatCompletionClient
+
+
+# --- Module-level singleton accessors ---
+
+_router: Optional["EndpointRouter"] = None
+
+def get_router() -> "EndpointRouter":
+    """Lazily create the module-level singleton and return it."""
+    global _router
+    if _router is None:
+        _router = EndpointRouter()
+    return _router
+
+async def aclose_router() -> None:
+    """
+    If the singleton exists, await its aclose() and set the module global back
+    to None. Safe to call when no router exists.
+    """
+    global _router
+    if _router is not None:
+        await _router.aclose()
+        _router = None
+
+
+# --- Logging ---
+
+_logger: Optional[logging.Logger] = None
+
+def _get_router_logger() -> logging.Logger:
+    """Get or create the module logger with file handler."""
+    global _logger
+    if _logger is not None:
+        return _logger
+
+    logger_name = "deep_research_agent.router"
+    logger = logging.getLogger(logger_name)
+    logger.setLevel(logging.INFO)
+
+    # Guard against duplicate handlers on repeated imports
+    if logger.handlers:
+        logger.propagate = False
+        return logger
+
+    log_dir = pathlib.Path.home() / f".{config.APP_NAME}" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "router.log"
+
+    handler = logging.FileHandler(log_path, encoding="utf-8")
+    handler.setLevel(logging.INFO)
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.propagate = False
+
+    _logger = logger
+    return logger
+
+
+# --- Backoff schedule ---
+
+_BACKOFF: Tuple[int, ...] = (10, 30, 60, 60, 60, 60)
+_MAX_FAILS = 6
+
+
+class _EndpointState:
+    """
+    Holds the state for a single endpoint URL.
+
+    Fields are set in __init__(self, url: str, cap: int).
+    """
+
+    def __init__(self, url: str, cap: int):
+        self.url = url
+        self.raw: Optional["AsyncOpenAI"] = None  # type: ignore[name-defined]
+        self.client: Optional[OpenAIChatCompletionClient] = None
+        self.sem = asyncio.Semaphore(cap)
+        self.up = True              # OPTIMISTIC: unknown means "candidate for priming"
+        self.primed = False
+        self.fail_count = 0
+        self.permanently_down = False
+        self.next_probe_at = 0.0    # time.monotonic() deadline
+        self.served = 0             # count of tasks served, for diagnostics
+
+
+class EndpointRouter:
+    """
+    Manages multiple LLM endpoints with health tracking and per-endpoint
+    concurrency limits.
+
+    Health snapshots are taken at query start; no mid-query rebalancing occurs.
+    Global concurrency = (number of up endpoints) * per_endpoint_cap.
+    """
+
+    def __init__(self):
+        """
+        Initialize the router. Builds endpoint clients but does NOT perform
+        any network I/O.
+        """
+        api_cfg = config.cfg.get("api", {})
+        self._urls: List[str] = api_cfg.get("openai_base_urls", [])
+        if not self._urls:
+            self._urls = ["http://localhost:8080/v1"]
+
+        self._model: str = api_cfg.get("openai_model", "local-model")
+        self._cap: int = config.cfg.get("settings", {}).get("concurrency", {}).get("per_endpoint_cap", 1)
+        if self._cap < 1:
+            self._cap = 1
+
+        # Build endpoints dict in config order
+        self._endpoints: dict[str, _EndpointState] = {}
+        for url in self._urls:
+            state = _EndpointState(url, self._cap)
+            self._build_endpoint_clients(state)
+            self._endpoints[url] = state
+
+        self._snapshot_urls: List[str] = []
+        self._concurrency: int = self._cap
+        self._poll_task: Optional[asyncio.Task[None]] = None
+        self._closed: bool = False
+
+        self._logger = _get_router_logger()
+
+    def _build_endpoint_clients(self, state: _EndpointState) -> None:
+        """
+        Build the raw and client objects for an endpoint, matching the pattern
+        from orchestrator.py's _build_client().
+        """
+        from openai import AsyncOpenAI
+
+        raw = AsyncOpenAI(
+            base_url=state.url,
+            api_key=os.getenv("OPENAI_API_KEY", "dummy"),
+            timeout=httpx.Timeout(1800.0, connect=15.0, read=300.0),
+        )
+        state.raw = raw
+        state.client = OpenAIChatCompletionClient(model=self._model, async_client=raw)
+
+    def current_concurrency(self) -> int:
+        """Return the current global concurrency limit."""
+        return self._concurrency
+
+    def orchestrator_client(self) -> OpenAIChatCompletionClient:
+        """
+        Return the OpenAIChatCompletionClient of the first URL in
+        self._snapshot_urls.
+
+        The orchestrator agent is pinned to one endpoint for the whole query.
+        If snapshot_and_prime() has not been called or no endpoints are up,
+        raise RuntimeError with a clear message.
+        """
+        if not self._snapshot_urls:
+            raise RuntimeError(
+                "No LLM endpoints available: snapshot_and_prime() must be "
+                "called first to prime and discover healthy endpoints."
+            )
+        return self._endpoints[self._snapshot_urls[0]].client
+
+    def endpoint_count(self) -> int:
+        """Return the number of up endpoints in the current snapshot."""
+        return len(self._snapshot_urls)
+
+    async def snapshot_and_prime(
+        self,
+        notify: Optional[asyncio.Callable[[str], None]] = None
+    ) -> Tuple[List[str], int]:
+        """
+        Take a health snapshot of all endpoints, prime unprimed candidates,
+        and update the concurrency limit.
+
+        Args:
+            notify: Optional async callable taking a single string message.
+                   Used to surface one message per endpoint (greeting or failure).
+                   If None, log only.
+
+        Returns:
+            Tuple of (list of up endpoint URLs, derived global concurrency)
+
+        Raises:
+            RuntimeError: If no endpoints are available after priming.
+        """
+        # 1. Start the poller if not already running
+        self._ensure_poller()
+
+        # 2. Candidates = every endpoint where (not permanently_down) and up is True
+        candidates = [
+            state for state in self._endpoints.values()
+            if not state.permanently_down and state.up
+        ]
+
+        # 3. For every candidate with primed == False, prime concurrently
+        async def _prime_if_needed(state: _EndpointState) -> Optional[str]:
+            """Prime an endpoint and return a message string."""
+            if state.primed:
+                return None
+            try:
+                reply = await self._prime(state)
+                state.primed = True
+                state.up = True
+                state.fail_count = 0
+                preview = reply[:200] + ("..." if len(reply) > 200 else "")
+                msg = f"[{state.url}] primed OK: {preview}"
+                return msg
+            except Exception as e:
+                state.primed = False
+                state.up = False
+                state.fail_count += 1
+                if state.fail_count >= _MAX_FAILS:
+                    state.permanently_down = True
+                    self._logger.info(
+                        f"[{state.url}] PRIME FAILED permanently: {e}"
+                    )
+                else:
+                    # Set next_probe_at from backoff schedule
+                    idx = min(state.fail_count - 1, len(_BACKOFF) - 1)
+                    state.next_probe_at = time.monotonic() + _BACKOFF[idx]
+                msg = f"[{state.url}] PRIME FAILED — excluded from this query: {e}"
+                return msg
+
+        # Gather priming tasks for unprimed candidates
+        tasks_to_prime = [
+            (state, asyncio.create_task(_prime_if_needed(state)))
+            for state in candidates
+            if not state.primed
+        ]
+
+        if tasks_to_prime:
+            results = await asyncio.gather(
+                *[t[1] for t in tasks_to_prime],
+                return_exceptions=True
+            )
+            for i, ((state, task), result) in enumerate(zip(tasks_to_prime, results)):
+                # Handle exceptions from gather
+                if isinstance(result, Exception):
+                    msg = f"[{state.url}] PRIME FAILED — excluded from this query: {result}"
+                else:
+                    msg = result
+                if msg is not None:
+                    self._logger.info(msg)
+                    if notify is not None:
+                        await notify(msg)
+
+        # 4. Snapshot = [url for endpoints that are up, not permanently_down, and primed]
+        self._snapshot_urls = [
+            url for url in self._urls
+            if (
+                url in self._endpoints and
+                self._endpoints[url].up and
+                not self._endpoints[url].permanently_down and
+                self._endpoints[url].primed
+            )
+        ]
+
+        # 5. If empty, raise RuntimeError
+        if not self._snapshot_urls:
+            raise RuntimeError(
+                "No LLM endpoints available: all configured endpoints failed priming."
+            )
+
+        # 6. Update concurrency
+        self._concurrency = len(self._snapshot_urls) * self._cap
+
+        # 7. Log snapshot and return
+        self._logger.info(
+            f"Snapshot: {len(self._snapshot_urls)} endpoint(s), "
+            f"global concurrency = {self._concurrency}"
+        )
+
+        return list(self._snapshot_urls), self._concurrency
+
+    async def _prime(self, state: _EndpointState) -> str:
+        """
+        Issue a bare completion to prime an endpoint.
+
+        Returns the reply text (first choice message content).
+        600s timeout because cold LM Studio must load model into VRAM.
+        """
+        resp = await state.raw.chat.completions.create(
+            model=self._model,
+            messages=[{"role": "user", "content": "Reply with the single word: ready"}],
+            max_tokens=16,
+            timeout=600.0,
+        )
+        return resp.choices[0].message.content or ""
+
+    @contextlib.asynccontextmanager
+    async def acquire(
+        self,
+        task_name: str = None
+    ):
+        """
+        Acquire a permit from an available endpoint and yield its client.
+
+        This is the main entry point for tasks to use an endpoint. It:
+        1. Finds an available endpoint
+        2. Logs which endpoint served which task (for tracing)
+        3. Yields the OpenAIChatCompletionClient
+
+        Usage:
+            async with router.acquire("my_task") as client:
+                result = await client.do_something()
+
+        Args:
+            task_name: Optional name for logging which endpoint served what.
+        """
+        ep = await self._acquire_first_available()
+        ep.served += 1
+        if task_name:
+            self._logger.info(f"Endpoint {ep.url} served task '{task_name}'")
+        else:
+            self._logger.info(f"Endpoint {ep.url} served a task")
+
+        try:
+            yield ep.client
+        finally:
+            ep.sem.release()
+
+    async def _acquire_first_available(self) -> _EndpointState:
+        """
+        Returns the winning _EndpointState, holding exactly ONE permit on it.
+
+        This helper owns all the racy logic; it is unit-tested directly.
+
+        If there is exactly one snapshot endpoint: await its sem.acquire()
+        and return it (no race possible).
+
+        Otherwise: use asyncio.wait with FIRST_COMPLETED to find the winner,
+        releasing permits of any other completed acquires.
+        """
+        if len(self._snapshot_urls) == 1:
+            # Single endpoint: no race, just acquire
+            ep = self._endpoints[self._snapshot_urls[0]]
+            await ep.sem.acquire()
+            return ep
+
+        # Multiple endpoints: use FIRST_COMPLETED semantics with bounded loop
+        while True:
+            eps = [self._endpoints[u] for u in self._snapshot_urls]
+            tasks = {asyncio.create_task(ep.sem.acquire()): ep for ep in eps}
+
+            done, pending = await asyncio.wait(
+                tasks.keys(),
+                return_when=asyncio.FIRST_COMPLETED
+            )
+
+            winner: Optional[_EndpointState] = None
+
+            # Window 1 — MULTI-COMPLETION handling
+            for t in done:
+                ep = tasks[t]
+                if t.cancelled() or t.exception() is not None:
+                    continue
+                if winner is None:
+                    winner = ep
+                else:
+                    # Another acquire completed; release its permit
+                    ep.sem.release()
+
+            # Cancel pending tasks
+            for t in pending:
+                t.cancel()
+
+            # Window 2 — CANCEL RACE handling
+            # A pending acquire can complete between wait returning and cancel landing
+            for t in pending:
+                ep = tasks[t]
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    continue  # genuinely cancelled: took nothing
+                except Exception:
+                    continue
+                if winner is None:
+                    winner = ep
+                else:
+                    ep.sem.release()
+
+            if winner is None:
+                await asyncio.sleep(0)      # yield; do not busy-recurse
+                continue
+
+            return winner
+
+    def _ensure_poller(self) -> None:
+        """If poll_task is None and not closed, create the poll task."""
+        if self._poll_task is None and not self._closed:
+            self._poll_task = asyncio.create_task(self._poll_loop())
+
+    def _mark_probe_failed(self, state: _EndpointState) -> None:
+        """
+        Mark an endpoint as failed (synchronous, no awaits).
+
+        Updates state.up=False, state.primed=False, increments fail_count,
+        sets next_probe_at from backoff schedule. If max fails reached,
+        marks permanently_down.
+        """
+        state.up = False
+        state.primed = False
+        state.fail_count += 1
+        if state.fail_count >= _MAX_FAILS:
+            state.permanently_down = True
+            self._logger.info(
+                f"[{state.url}] marked permanently DOWN after {_MAX_FAILS} failures"
+            )
+        else:
+            idx = min(state.fail_count - 1, len(_BACKOFF) - 1)
+            state.next_probe_at = time.monotonic() + _BACKOFF[idx]
+
+    def _mark_up(self, state: _EndpointState) -> None:
+        """
+        Mark an endpoint as up (synchronous, no awaits).
+
+        Updates state.up=True, resets fail_count to 0 and next_probe_at.
+        Does NOT set primed; a recovered endpoint must be re-primed before use.
+        """
+        state.up = True
+        state.fail_count = 0
+        state.next_probe_at = 0.0
+
+    async def _probe(self, state: _EndpointState) -> bool:
+        """
+        Cheap liveness check that does NOT load the model.
+
+        HTTP GET on {url.rstrip('/')}/models using short-lived client.
+        Return True on HTTP 2xx, False otherwise.
+        """
+        url = state.url.rstrip("/") + "/models"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(url)
+                return 200 <= resp.status_code < 300
+        except Exception:
+            return False
+
+    async def _poll_loop(self) -> None:
+        """
+        Background poller that periodically checks down endpoints.
+
+        Sleeps 5 seconds between iterations. For each endpoint not up and not
+        permanently_down, probes it. On success marks up; on failure applies
+        backoff. Never dies silently.
+        """
+        while True:
+            await asyncio.sleep(5)
+            now = time.monotonic()
+            for state in list(self._endpoints.values()):
+                if state.permanently_down or state.up:
+                    continue
+                if now < state.next_probe_at:
+                    continue
+                ok = await self._probe(state)
+                if ok:
+                    self._mark_up(state)
+                else:
+                    self._mark_probe_failed(state)
+
+    async def aclose(self) -> None:
+        """
+        Close the router: cancel poller and close all endpoint clients.
+
+        Idempotent: a second call must not raise.
+        """
+        self._closed = True
+
+        # Cancel poll task if present
+        if self._poll_task is not None:
+            self._poll_task.cancel()
+            try:
+                await self._poll_task
+            except asyncio.CancelledError:
+                pass
+            self._poll_task = None
+
+        # Close all raw clients
+        for state in self._endpoints.values():
+            if state.raw is not None:
+                try:
+                    await state.raw.close()
+                except Exception:
+                    # One failure should not block others
+                    pass
