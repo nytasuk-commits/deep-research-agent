@@ -88,14 +88,14 @@ class _EndpointState:
     """
     Holds the state for a single endpoint URL.
 
-    Fields are set in __init__(self, url: str, cap: int).
+    Fields are set in __init__(self, url: str).
     """
 
-    def __init__(self, url: str, cap: int):
+    def __init__(self, url: str):
         self.url = url
         self.raw: Optional["AsyncOpenAI"] = None  # type: ignore[name-defined]
         self.client: Optional[OpenAIChatCompletionClient] = None
-        self.sem = asyncio.Semaphore(cap)
+        self.inflight = 0           # tasks currently being served by this endpoint
         self.up = True              # OPTIMISTIC: unknown means "candidate for priming"
         self.primed = False
         self.fail_count = 0
@@ -131,7 +131,7 @@ class EndpointRouter:
         # Build endpoints dict in config order
         self._endpoints: dict[str, _EndpointState] = {}
         for url in self._urls:
-            state = _EndpointState(url, self._cap)
+            state = _EndpointState(url)
             self._build_endpoint_clients(state)
             self._endpoints[url] = state
 
@@ -309,98 +309,39 @@ class EndpointRouter:
         self,
         task_name: str = None
     ):
-        """
-        Acquire a permit from an available endpoint and yield its client.
-
-        This is the main entry point for tasks to use an endpoint. It:
-        1. Finds an available endpoint
-        2. Logs which endpoint served which task (for tracing)
-        3. Yields the OpenAIChatCompletionClient
-
-        Usage:
-            async with router.acquire("my_task") as client:
-                result = await client.do_something()
-
-        Args:
-            task_name: Optional name for logging which endpoint served what.
-        """
-        ep = await self._acquire_first_available()
+        """Yield the client of the least-loaded endpoint. Never blocks."""
+        ep = self._select_endpoint()
+        ep.inflight += 1
         ep.served += 1
-        if task_name:
-            self._logger.info(f"Endpoint {ep.url} served task '{task_name}'")
-        else:
-            self._logger.info(f"Endpoint {ep.url} served a task")
-
+        self._logger.info(
+            f"Endpoint {ep.url} serving task '{task_name or '<unnamed>'}' "
+            f"(inflight={ep.inflight}, cap={self._cap}, served={ep.served})"
+        )
         try:
             yield ep.client
         finally:
-            ep.sem.release()
+            ep.inflight -= 1
 
-    async def _acquire_first_available(self) -> _EndpointState:
+    def _select_endpoint(self) -> _EndpointState:
+        """Pick the endpoint with the fewest in-flight tasks.
+
+        Never blocks and never waits: the global semaphore in orchestrator.py
+        is the sole admission-control primitive. This method only decides WHICH
+        endpoint serves an already-admitted task. Ties break toward the earlier
+        endpoint in config order, which keeps single-endpoint behaviour
+        identical to the pre-router code path.
         """
-        Returns the winning _EndpointState, holding exactly ONE permit on it.
-
-        This helper owns all the racy logic; it is unit-tested directly.
-
-        If there is exactly one snapshot endpoint: await its sem.acquire()
-        and return it (no race possible).
-
-        Otherwise: use asyncio.wait with FIRST_COMPLETED to find the winner,
-        releasing permits of any other completed acquires.
-        """
-        if len(self._snapshot_urls) == 1:
-            # Single endpoint: no race, just acquire
-            ep = self._endpoints[self._snapshot_urls[0]]
-            await ep.sem.acquire()
-            return ep
-
-        # Multiple endpoints: use FIRST_COMPLETED semantics with bounded loop
-        while True:
-            eps = [self._endpoints[u] for u in self._snapshot_urls]
-            tasks = {asyncio.create_task(ep.sem.acquire()): ep for ep in eps}
-
-            done, pending = await asyncio.wait(
-                tasks.keys(),
-                return_when=asyncio.FIRST_COMPLETED
+        if not self._snapshot_urls:
+            raise RuntimeError(
+                "No endpoint snapshot: snapshot_and_prime() must be called "
+                "before serving tasks."
             )
+        eps = [self._endpoints[u] for u in self._snapshot_urls]
+        return min(eps, key=lambda e: e.inflight)
 
-            winner: Optional[_EndpointState] = None
-
-            # Window 1 — MULTI-COMPLETION handling
-            for t in done:
-                ep = tasks[t]
-                if t.cancelled() or t.exception() is not None:
-                    continue
-                if winner is None:
-                    winner = ep
-                else:
-                    # Another acquire completed; release its permit
-                    ep.sem.release()
-
-            # Cancel pending tasks
-            for t in pending:
-                t.cancel()
-
-            # Window 2 — CANCEL RACE handling
-            # A pending acquire can complete between wait returning and cancel landing
-            for t in pending:
-                ep = tasks[t]
-                try:
-                    await t
-                except asyncio.CancelledError:
-                    continue  # genuinely cancelled: took nothing
-                except Exception:
-                    continue
-                if winner is None:
-                    winner = ep
-                else:
-                    ep.sem.release()
-
-            if winner is None:
-                await asyncio.sleep(0)      # yield; do not busy-recurse
-                continue
-
-            return winner
+    def inflight_snapshot(self) -> dict:
+        """Current in-flight count per endpoint, for logging/diagnostics."""
+        return {u: self._endpoints[u].inflight for u in self._snapshot_urls}
 
     def _ensure_poller(self) -> None:
         """If poll_task is None and not closed, create the poll task."""

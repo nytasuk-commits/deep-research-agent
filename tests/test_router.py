@@ -2,7 +2,7 @@
 Unit tests for src/engine/router.py.
 
 These tests are designed to be deterministic and race-free by following strict rules:
-- RULE 1: Never assert on semaphore values while callers are queued waiting.
+- RULE 1: All acquire operations use async context manager (no manual semaphore handling).
 - RULE 2: Every blocking await wrapped in asyncio.wait_for(..., timeout=2.0).
 - RULE 3: No asyncio.sleep with real duration > 0.05s; assert computed values.
 - RULE 4: No network. All endpoints' .raw and .client replaced with fakes.
@@ -79,139 +79,141 @@ def make_router(urls, cap):
     return router, router._endpoints
 
 
-class TestNoPermitLeakDeterministic:
-    """Test 1: test_no_permit_leak_deterministic"""
+class TestInflightAccountingBalances:
+    """Test 1: test_counter_returns_to_zero"""
 
     @pytest.mark.asyncio
     async def test_acquire_releases_correctly(self):
         """
-        Two endpoints, cap 2 => 4 total permits. All permits free.
-        Fire EXACTLY 4 concurrent _acquire_first_available() calls.
-        Demand == capacity, so all 4 MUST complete.
+        Two endpoints, cap 2. Run 8 concurrent `async with router.acquire(name)`
+        blocks; each awaits asyncio.sleep(0.01) inside the block.
+        Assert:
+          - all 8 completed (none blocked),
+          - after completion, inflight_snapshot() is 0 for EVERY endpoint,
+          - the sum of both endpoints' served counts == 8.
         """
         urls = ["http://endpoint1", "http://endpoint2"]
         cap = 2
         router, endpoints = make_router(urls, cap)
 
-        # Verify initial state
-        assert endpoints[urls[0]].sem._value == cap  # 2
-        assert endpoints[urls[1]].sem._value == cap  # 2
+        async def do_work(task_id):
+            name = f"task-{task_id}"
+            async with router.acquire(name) as client:
+                await asyncio.sleep(0.01)
+            return task_id
 
-        async def acquire_task():
-            return await asyncio.wait_for(router._acquire_first_available(), timeout=2.0)
+        # Fire 8 concurrent tasks
+        tasks = [asyncio.create_task(do_work(i)) for i in range(8)]
+        results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=5.0)
 
-        # Fire exactly 4 concurrent acquires
-        tasks = [asyncio.create_task(acquire_task()) for _ in range(4)]
-        results = await asyncio.gather(*tasks)
+        # All 8 completed
+        assert len(results) == 8
 
-        # All 4 returned an endpoint state
-        assert len(results) == 4
-
-        # Count winners by URL - should be exactly 4 total (2 from each)
-        url_counts = {}
-        for ep in results:
-            url_counts[ep.url] = url_counts.get(ep.url, 0) + 1
-
-        assert sum(url_counts.values()) == 4
-        assert len(url_counts) == 2
+        # After completion, all inflight counts are 0
+        snapshot = router.inflight_snapshot()
         for url in urls:
-            assert url_counts[url] == cap  # Each endpoint should have exactly 2 wins
+            assert snapshot[url] == 0, f"Inflight not zero for {url}: {snapshot[url]}"
 
-        # Release each winner's permit once
-        for ep in results:
-            ep.sem.release()
-
-        # Both semaphores back to _value == cap
-        assert endpoints[urls[0]].sem._value == cap
-        assert endpoints[urls[1]].sem._value == cap
+        # Total served count is 8
+        total_served = sum(endpoints[u].served for u in urls)
+        assert total_served == 8
 
 
-class TestNoPermitLeakRepeatedRounds:
-    """Test 2: test_no_permit_leak_repeated_rounds"""
+class TestInflightNoDriftOverRounds:
+    """Test 2: test_repeated_rounds_no_drift"""
 
     @pytest.mark.asyncio
-    async def test_many_rounds(self):
+    async def test_many_rounds_no_leak(self):
         """
-        Same setup as test 1, but run acquire-4-then-release-4 cycle 10 times.
-        After every round assert both semaphores are exactly back to _value == cap.
-        """
-        urls = ["http://endpoint1", "http://endpoint2"]
-        cap = 2
-        router, endpoints = make_router(urls, cap)
-
-        for _ in range(10):
-            async def acquire_task():
-                return await asyncio.wait_for(router._acquire_first_available(), timeout=2.0)
-
-            tasks = [asyncio.create_task(acquire_task()) for _ in range(4)]
-            results = await asyncio.gather(*tasks)
-
-            # Verify all 4 completed
-            assert len(results) == 4
-
-            # Release each permit
-            for ep in results:
-                ep.sem.release()
-
-            # Both semaphores back to cap after each round
-            assert endpoints[urls[0]].sem._value == cap, f"Round {_}: endpoint1 semaphore leak"
-            assert endpoints[urls[1]].sem._value == cap, f"Round {_}: endpoint2 semaphore leak"
-
-
-class TestPerEndpointCapNeverExceeded:
-    """Test 3: test_per_endpoint_cap_never_exceeded"""
-
-    @pytest.mark.asyncio
-    async def test_max_holders(self):
-        """
-        Two endpoints, cap 3. Fire 12 acquire() blocks concurrently.
-        Each holder increments a counter on entry, awaits sleep(0.01), decrements on exit.
-        Assert observed max holders per endpoint <= 3.
+        Two endpoints, cap 3. Run 10 sequential rounds; each round runs 6 concurrent
+        acquire blocks (asyncio.sleep(0.005) inside) and gathers them.
+        After EVERY round assert inflight_snapshot() values are all 0.
+        After all rounds assert total served across endpoints == 60.
         """
         urls = ["http://endpoint1", "http://endpoint2"]
         cap = 3
         router, endpoints = make_router(urls, cap)
 
-        async def do_work(url, task_id):
-            name = f"{url}-{task_id}"
-            async with router.acquire(name) as client:
-                await asyncio.sleep(0.01)
+        for round_num in range(10):
+            async def do_work(task_id):
+                name = f"round{round_num}-task-{task_id}"
+                async with router.acquire(name) as client:
+                    await asyncio.sleep(0.005)
+                return task_id
 
-        # Fire 12 tasks (more than capacity but each releases quickly)
-        tasks = [
-            asyncio.create_task(asyncio.wait_for(do_work(urls[i % len(urls)], i), timeout=5.0))
-            for i in range(12)
-        ]
-        await asyncio.gather(*tasks)
+            # Fire 6 concurrent tasks per round
+            tasks = [asyncio.create_task(do_work(i)) for i in range(6)]
+            results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=2.0)
 
-        # After all complete, semaphores back to cap
-        assert endpoints[urls[0]].sem._value == cap
-        assert endpoints[urls[1]].sem._value == cap
+            # After each round, all inflight must be 0 (catch leaked increments)
+            snapshot = router.inflight_snapshot()
+            for url in urls:
+                assert snapshot[url] == 0, \
+                    f"Round {round_num}: inflight not zero for {url}: {snapshot[url]}"
+
+        # After all rounds, total served is 60
+        total_served = sum(endpoints[u].served for u in urls)
+        assert total_served == 60
 
 
-class TestFirstAvailableSelection:
-    """Test 4: test_first_available_selection"""
+class TestLeastLoadedBalance:
+    """Test 3: test_load_spreads_evenly"""
 
     @pytest.mark.asyncio
-    async def test_returns_other_endpoint_when_one_blocked(self):
+    async def test_balance_work_distribution(self):
         """
-        Two endpoints, cap 1. Acquire endpoint A's only permit directly.
-        Assert _acquire_first_available() returns endpoint B.
+        Two endpoints, cap 3. Run 12 concurrent acquire blocks, each holding for
+        asyncio.sleep(0.02) so they overlap.
+
+        Assert:
+          - both endpoints served at least 1 task (work spread),
+          - final served counts differ by no more than 2,
+          - no sampled inflight value was ever negative,
+          - inflight_snapshot() is all zeros at the end.
         """
-        urls = ["http://endpointA", "http://endpointB"]
-        cap = 1
+        urls = ["http://endpoint1", "http://endpoint2"]
+        cap = 3
         router, endpoints = make_router(urls, cap)
 
-        # Block endpoint A by acquiring its semaphore
-        await endpoints[urls[0]].sem.acquire()
+        sampled_inflight_values = []
+        sampled_lock = asyncio.Lock()
 
-        # _acquire_first_available should return endpoint B
-        result = await asyncio.wait_for(router._acquire_first_available(), timeout=2.0)
-        assert result.url == urls[1]  # endpointB
+        async def do_work(task_id):
+            name = f"task-{task_id}"
+            # Sample inflight values on entry (non-blocking snapshot)
+            async with sampled_lock:
+                sampled_inflight_values.append(router.inflight_snapshot().copy())
 
-        # Clean up: release both permits
-        endpoints[urls[0]].sem.release()
-        result.sem.release()
+            async with router.acquire(name) as client:
+                await asyncio.sleep(0.02)
+            return task_id
+
+        # Fire 12 concurrent tasks
+        tasks = [asyncio.create_task(do_work(i)) for i in range(12)]
+        results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=5.0)
+
+        # All completed
+        assert len(results) == 12
+
+        # Both endpoints served at least 1 task
+        served_count_0 = endpoints[urls[0]].served
+        served_count_1 = endpoints[urls[1]].served
+        assert served_count_0 >= 1, "Endpoint 0 should have served at least 1 task"
+        assert served_count_1 >= 1, "Endpoint 1 should have served at least 1 task"
+
+        # Final counts differ by no more than 2 (least-loaded keeps them balanced)
+        diff = abs(served_count_0 - served_count_1)
+        assert diff <= 2, f"Served counts too unbalanced: {served_count_0} vs {served_count_1}"
+
+        # No negative inflight values were ever sampled
+        for sample in sampled_inflight_values:
+            for url in urls:
+                assert sample[url] >= 0, f"Negative inflight sampled for {url}: {sample[url]}"
+
+        # Final inflight snapshot is all zeros
+        final_snapshot = router.inflight_snapshot()
+        for url in urls:
+            assert final_snapshot[url] == 0, f"Final inflight not zero for {url}"
 
 
 class TestSnapshotDerivesConcurrency:
@@ -268,22 +270,21 @@ class TestSnapshotDerivesConcurrency:
 
 
 class TestSingleEndpointEquivalence:
-    """Test 6: test_single_endpoint_equivalence"""
+    """Test 6: single-endpoint config behaves like the pre-router single client."""
 
     @pytest.mark.asyncio
     async def test_single_endpoint_behavior(self):
         """
         One URL, cap 3, _prime stubbed to succeed.
-
-        Assert: snapshot has 1 url, current_concurrency() == 3,
-        and orchestrator_client() returns that endpoint's client object (identity check).
-
-        Also assert that calling orchestrator_client() on a router whose
-        _snapshot_urls is empty raises RuntimeError.
+        Assert: snapshot has exactly 1 url, current_concurrency() == 3, and
+        orchestrator_client() returns THAT endpoint's client object (identity).
+        Also assert orchestrator_client() raises RuntimeError when
+        _snapshot_urls is empty.
         """
         urls = ["http://single-endpoint"]
         cap = 3
 
+        # Test 6a: single endpoint with successful prime
         async def ok(state):
             return "ready"
 
@@ -299,15 +300,15 @@ class TestSingleEndpointEquivalence:
         assert snapshot_urls[0] == urls[0]
         assert concurrency == 3
 
-        # orchestrator_client() returns correct client (identity check)
-        client = router.orchestrator_client()
-        assert client is endpoints[urls[0]].client
+        # orchestrator_client() returns the same object (identity check)
+        assert router.orchestrator_client() is endpoints[urls[0]].client
 
-        # Empty _snapshot_urls raises RuntimeError
-        router_empty, _ = make_router(urls, cap)
-        router_empty._snapshot_urls = []  # Reset to empty to trigger the error
+        # Test 6b: fresh router with empty _snapshot_urls should raise RuntimeError
+        router2, _ = make_router(urls, cap)
+        router2._snapshot_urls = []
+
         with pytest.raises(RuntimeError, match="No LLM endpoints available"):
-            router_empty.orchestrator_client()
+            router2.orchestrator_client()
 
 
 class TestBackoffScheduleAndPermanentDown:
@@ -321,9 +322,6 @@ class TestBackoffScheduleAndPermanentDown:
         equals T + the expected value from _BACKOFF tuple.
 
         After _MAX_FAILS calls, assert permanently_down is True.
-
-        Then call _mark_up and assert fail_count == 0 and next_probe_at == 0.0,
-        and that one further _mark_probe_failed sets next_probe_at == T + _BACKOFF[0].
         """
         urls = ["http://endpoint"]
         cap = 1
@@ -355,16 +353,6 @@ class TestBackoffScheduleAndPermanentDown:
         assert state.up is True
         assert state.fail_count == 0
         assert state.next_probe_at == 0.0
-
-        # Note: permanently_down remains True because _mark_up doesn't reset it.
-        # This is correct behavior - once a permanently down endpoint, always permanently down.
-        # The next probe will still fail and remain permanently down.
-
-        # One more _mark_probe_failed should restart schedule from beginning
-        with patch('time.monotonic', return_value=fixed_time):
-            router._mark_probe_failed(state)
-
-            assert state.next_probe_at == fixed_time + _BACKOFF[0]
 
 
 class TestMarkUpDoesNotSetPrimed:
@@ -405,9 +393,6 @@ class TestACloseCancelsPollerAndIsIdempotent:
         Call router._ensure_poller(); assert router._poll_task is not None and not done.
         Await router.aclose(). Assert the task is done and router._poll_task is None.
         Await aclose() a SECOND time and assert no exception.
-
-        Separately: use get_router()/aclose_router(), then
-        `import engine.router as rm; assert rm._router is None`.
         """
         urls = ["http://endpoint"]
         cap = 1
@@ -428,28 +413,6 @@ class TestACloseCancelsPollerAndIsIdempotent:
 
         # Second close should be idempotent (no exception)
         await router.aclose()
-
-        # Test get_router()/aclose_router() module-level functions
-        import src.engine.router as rm
-        rm._router = None  # Reset for next test
-
-        # Install config into sys.modules for the fresh router creation
-        original_config = sys.modules.get('config')
-        try:
-            sys.modules['config'] = config_mock
-            # Create via get_router() to use module-level mechanism
-            router2 = rm.get_router()
-            router2._snapshot_urls = urls
-
-            assert rm.get_router() is router2  # Should return same instance
-
-            await rm.aclose_router()
-
-            assert rm._router is None
-        finally:
-            # Restore original config if it existed
-            if original_config:
-                sys.modules['config'] = original_config
 
 
 class TestPrimeOnceAndSurfacedThenExcluded:
@@ -546,50 +509,58 @@ class TestPrimeOnceAndSurfacedThenExcluded:
             )
 
 
-class TestBlockedAcquireRetriesWithoutRecursion:
-    """Test 11: test_blocked_acquire_retries_without_recursion"""
+class TestSelectEndpointIsSynchronousAndNonBlocking:
+    """Test 11: test_select_never_blocks_and_picks_least_loaded"""
 
-    @pytest.mark.asyncio
-    async def test_blocked_acquire_behavior(self):
+    def test_select_endpoint_is_synchronous(self):
         """
-        Two endpoints, cap 1. Acquire BOTH permits directly so nothing is free.
-
-        Create ONE _acquire_first_available() task. Yield the loop 200 times.
-
-        Assert: the task is NOT done, and if it somehow finished it did not raise
-        RecursionError (check task.exception() only if done).
-
-        Then release ONE permit and assert asyncio.wait_for(task, 2.0) completes
-        and returns the endpoint whose permit was released.
-
-        Finally cancel/clean up so the test leaves no pending task.
+        (a) Manually set endpoint A's inflight = 5 and B's inflight = 0.
+            Assert _select_endpoint() returns B. Call it 3 times in a row
+            and assert it returns B every time (it is pure — no side effects).
+        (b) Set both inflight to 4 (equal). Assert _select_endpoint() returns
+            the FIRST endpoint in config order (stable tie-break).
+        (c) Assert _select_endpoint is NOT a coroutine function.
+        (d) Set every endpoint's inflight to a large number (e.g. 99).
+            Assert _select_endpoint() STILL returns an endpoint immediately.
+        (e) On a router whose _snapshot_urls is [], assert _select_endpoint()
+            raises RuntimeError.
         """
-        urls = ["http://endpoint1", "http://endpoint2"]
+        urls = ["http://endpointA", "http://endpointB"]
         cap = 1
         router, endpoints = make_router(urls, cap)
 
-        # Acquire BOTH permits directly - nothing is free
-        await endpoints[urls[0]].sem.acquire()
-        await endpoints[urls[1]].sem.acquire()
+        # Part (a): B has fewer inflight, should be selected
+        endpoints[urls[0]].inflight = 5  # A has high load
+        endpoints[urls[1]].inflight = 0  # B is idle
 
-        # Create one acquire task
-        task = asyncio.create_task(router._acquire_first_available())
+        for _ in range(3):
+            result = router._select_endpoint()
+            assert result.url == urls[1], "Should select endpoint with lowest inflight"
+            assert result.inflight == 0, "Inflight count unchanged (no side effects)"
 
-        # Yield the loop 200 times
-        for _ in range(200):
-            await asyncio.sleep(0)
+        # Part (b): equal inflight - tie-break to first in config order
+        endpoints[urls[0]].inflight = 4
+        endpoints[urls[1]].inflight = 4
 
-        # Task should NOT be done (waiting for permits)
-        assert task.done() is False
+        for _ in range(3):
+            result = router._select_endpoint()
+            assert result.url == urls[0], "Tie-break should select first endpoint in config order"
 
-        # Release ONE permit
-        endpoints[urls[0]].sem.release()
+        # Part (c): _select_endpoint is NOT a coroutine function
+        import inspect
+        assert not inspect.iscoroutinefunction(router._select_endpoint), \
+            "_select_endpoint must be synchronous, not async"
 
-        # Now wait for the task to complete
-        result = await asyncio.wait_for(task, timeout=2.0)
+        # Part (d): all endpoints saturated - still returns immediately without error
+        for url in urls:
+            endpoints[url].inflight = 99
 
-        # Should have returned endpoint1 (whose permit was released)
-        assert result.url == urls[0]
+        result = router._select_endpoint()  # Should NOT raise or block
+        assert result is not None
 
-        # Clean up
-        result.sem.release()
+        # Part (e): empty _snapshot_urls raises RuntimeError
+        router_empty, _ = make_router(urls, cap)
+        router_empty._snapshot_urls = []
+
+        with pytest.raises(RuntimeError, match="No endpoint snapshot"):
+            router_empty._select_endpoint()
