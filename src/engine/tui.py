@@ -438,8 +438,9 @@ class BasicTuiAgent(App):
             ascii_art = pyfiglet.figlet_format(AGENT_NAME, font="doom")
         except Exception:
             ascii_art = AGENT_NAME + "\n"
-            
-        endpoint = config.cfg["api"]["openai_base_url"]
+
+        _eps = config.cfg.get("api", {}).get("openai_base_urls", [])
+        endpoint = ", ".join(_eps) if _eps else "Unknown"
         model = config.cfg["api"]["openai_model"]
         thinking = "ON" if config.cfg["settings"]["enable_thinking"] else "OFF"
         thinking_color = "green" if config.cfg["settings"]["enable_thinking"] else "red"
@@ -484,6 +485,10 @@ class BasicTuiAgent(App):
             # Deferred to after mount completes: starting the worker mid-mount runs it
             # in a different context and breaks the agent framework's contextvar teardown.
             self.set_timer(0.1, lambda: self.run_agent("Hello", show_user_message=False))
+
+    async def on_unmount(self) -> None:
+        from engine.router import aclose_router
+        await aclose_router()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if getattr(self, "_file_picker_active", False) or getattr(self, "_session_picker_active", False):
@@ -652,13 +657,13 @@ class BasicTuiAgent(App):
             _current_session_id = sid
             _current_call_by_source.clear()
             _current_text_by_source.clear()
-            
+
             orchestrator_module.reset_session()
             if state_dict:
-                orchestrator_module.create_local_agent(builder=self.builder, session_data=state_dict)
+                await orchestrator_module.create_local_agent(builder=self.builder, session_data=state_dict)
             else:
-                orchestrator_module.create_local_agent(builder=self.builder)
-                
+                await orchestrator_module.create_local_agent(builder=self.builder)
+
             await self.reconstruct_ui_from_events(ui_events)
             
             chat.mount(Static(Markdown(f"**System:**\nSession `{sid}` restored successfully!"), classes="agent-bubble"))
@@ -976,9 +981,15 @@ class BasicTuiAgent(App):
                 
             if update or is_done:
                 await self.handle_agent_update(update, subagent_states[aname], chat, is_subagent=is_subagent, agent_name=aname, is_done=is_done)
-            
+
+        async def notify_callback(msg: str) -> None:
+            """Mount each priming message as a system bubble in the chat container."""
+            chat = self.query_one("#chat-container", VerticalScroll)
+            chat.mount(Static(Markdown(f"**System:**\n{msg}"), classes="agent-bubble"))
+            chat.scroll_end(animate=False)
+
         # Create agent (re-reads config) and get session (None if conversational memory disabled)
-        agent, session = create_local_agent(builder=self.builder, subagent_callback=ui_callback)
+        agent, session = await create_local_agent(builder=self.builder, subagent_callback=ui_callback, notify=notify_callback)
         current_input = query
         has_requests = True
         enforced_review_check = False
@@ -1257,7 +1268,7 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
 
     async def cli_subagent_callback(update, is_subagent=True, is_done=False, **kwargs):
         agent_name = kwargs.get("agent_name") or getattr(update, "author_name", None) or "Sub-Agent"
-        
+
         requests = kwargs.get("approval_requests", [])
         if requests:
             from agent_framework import Message
@@ -1270,14 +1281,14 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
                     sys.stdout.write(f"\n\033[91m[{agent_name}] Denied {req.function_call.name} (Auto-approve disabled).\033[0m\n")
                 responses.append(Message("user", [req.to_function_approval_response(is_approved)]))
             return responses
-            
+
         if is_done:
             sys.stdout.write(f"\n\033[92m[{agent_name}] Finished.\033[0m\n")
             return
-            
+
         if update is None:
             return
-            
+
         for content in update.contents:
             if content.type == "text" and content.text:
                 log_stream_content(agent_name, "text", {"text": content.text})
@@ -1297,6 +1308,10 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
                                 "call_id": call_id, "result": str(result)
                             })
                             # Detect the draft report being written -> demand review immediately
+
+    async def cli_notify(msg: str) -> None:
+        sys.stdout.write(f"\n\033[93m[Router] {msg}\033[0m\n")
+        sys.stdout.flush()
 
     session_data = None
     if session_id:
@@ -1331,7 +1346,7 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
     elif prompt:
         log_prompt(prompt)
 
-    agent, session = create_local_agent(builder=builder, subagent_callback=cli_subagent_callback, session_data=session_data)
+    agent, session = await create_local_agent(builder=builder, subagent_callback=cli_subagent_callback, session_data=session_data, notify=cli_notify)
 
     if prompt_file:
         try:
@@ -1351,7 +1366,7 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
     workspace_dir = config.cfg.get("settings", {}).get("workspace", {}).get("dir", ".")
     workspace_disp = f"Disk ({workspace_dir})" if workspace_type == "disk" else "In-Memory"
     
-    endpoint = config.cfg.get("api", {}).get("openai_base_url", "Unknown")
+    endpoint = ", ".join(config.cfg.get("api", {}).get("openai_base_urls", [])) if config.cfg.get("api", {}).get("openai_base_urls") else "Unknown"
     model = config.cfg.get("api", {}).get("openai_model", "Unknown")
     
     thinking = "ON" if config.cfg.get("settings", {}).get("enable_thinking", False) else "OFF"
@@ -1494,6 +1509,11 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
         if session_token is not None:
             from tools.fs import session_dir_ctx
             session_dir_ctx.reset(session_token)
+        try:
+            from engine.router import aclose_router
+            await aclose_router()
+        except Exception:
+            pass
 
 def cli_main(builder):
     parser = argparse.ArgumentParser(description="Basic Agent TUI / CLI Scaffold")
