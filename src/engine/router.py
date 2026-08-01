@@ -96,6 +96,7 @@ class _EndpointState:
         self.raw: Optional["AsyncOpenAI"] = None  # type: ignore[name-defined]
         self.client: Optional[OpenAIChatCompletionClient] = None
         self.inflight = 0           # tasks currently being served by this endpoint
+        self.peak_inflight = 0      # highest simultaneous inflight seen
         self.up = True              # OPTIMISTIC: unknown means "candidate for priming"
         self.primed = False
         self.fail_count = 0
@@ -137,6 +138,7 @@ class EndpointRouter:
 
         self._snapshot_urls: List[str] = []
         self._concurrency: int = self._cap
+        self._peak_total_inflight = 0   # highest sum of inflight across all endpoints
         self._poll_task: Optional[asyncio.Task[None]] = None
         self._closed: bool = False
 
@@ -305,22 +307,30 @@ class EndpointRouter:
         return resp.choices[0].message.content or ""
 
     @contextlib.asynccontextmanager
-    async def acquire(
-        self,
-        task_name: str = None
-    ):
+    async def acquire(self, task_name: str = None):
         """Yield the client of the least-loaded endpoint. Never blocks."""
         ep = self._select_endpoint()
         ep.inflight += 1
         ep.served += 1
+        if ep.inflight > ep.peak_inflight:
+            ep.peak_inflight = ep.inflight
+        total = sum(self._endpoints[u].inflight for u in self._snapshot_urls)
+        if total > self._peak_total_inflight:
+            self._peak_total_inflight = total
         self._logger.info(
-            f"Endpoint {ep.url} serving task '{task_name or '<unnamed>'}' "
-            f"(inflight={ep.inflight}, cap={self._cap}, served={ep.served})"
+            f"ACQUIRE {ep.url} task='{task_name or '<unnamed>'}' "
+            f"inflight={ep.inflight}/{self._cap} total={total}/{self._concurrency} "
+            f"served={ep.served} peak_ep={ep.peak_inflight} peak_total={self._peak_total_inflight}"
         )
         try:
             yield ep.client
         finally:
             ep.inflight -= 1
+            total_after = sum(self._endpoints[u].inflight for u in self._snapshot_urls)
+            self._logger.info(
+                f"RELEASE {ep.url} task='{task_name or '<unnamed>'}' "
+                f"inflight={ep.inflight}/{self._cap} total={total_after}/{self._concurrency}"
+            )
 
     def _select_endpoint(self) -> _EndpointState:
         """Pick the endpoint with the fewest in-flight tasks.
@@ -342,6 +352,14 @@ class EndpointRouter:
     def inflight_snapshot(self) -> dict:
         """Current in-flight count per endpoint, for logging/diagnostics."""
         return {u: self._endpoints[u].inflight for u in self._snapshot_urls}
+
+    def peak_summary(self) -> dict:
+        """Peak concurrency observed so far, for diagnostics."""
+        return {
+            "per_endpoint": {u: self._endpoints[u].peak_inflight for u in self._snapshot_urls},
+            "total": self._peak_total_inflight,
+            "derived_global_concurrency": self._concurrency,
+        }
 
     def _ensure_poller(self) -> None:
         """If poll_task is None and not closed, create the poll task."""
@@ -432,6 +450,12 @@ class EndpointRouter:
             except asyncio.CancelledError:
                 pass
             self._poll_task = None
+
+        # Log peak summary at teardown (wrap in try/except to never block)
+        try:
+            self._logger.info(f"PEAK SUMMARY: {self.peak_summary()}")
+        except Exception:
+            pass
 
         # Close all raw clients
         for state in self._endpoints.values():
