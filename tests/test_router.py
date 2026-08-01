@@ -11,8 +11,15 @@ Shared helper make_router() monkeypatches config.cfg reads and uses MagicMock
 for all endpoint clients.
 """
 
+import os
 import sys
+import tempfile
 from pathlib import Path
+
+# Set env var BEFORE importing anything else (the logger is built at import time)
+os.environ["DRA_ROUTER_LOG"] = os.path.join(
+    tempfile.gettempdir(), "dra_router_test.log"
+)
 
 # Add src/ to path so imports work correctly
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))

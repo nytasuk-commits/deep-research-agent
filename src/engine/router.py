@@ -44,6 +44,19 @@ async def aclose_router() -> None:
 
 # --- Logging ---
 
+_LOG_PATH_ENV = "DRA_ROUTER_LOG"
+
+
+def _resolve_log_path() -> pathlib.Path:
+    """Router log location. Overridable via DRA_ROUTER_LOG so test runs do
+    not write into the operator's real log (and so a hung test process does
+    not hold the real log file open)."""
+    override = os.environ.get(_LOG_PATH_ENV)
+    if override:
+        return pathlib.Path(override)
+    return pathlib.Path.home() / f".{config.APP_NAME}" / "logs" / "router.log"
+
+
 _logger: Optional[logging.Logger] = None
 
 def _get_router_logger() -> logging.Logger:
@@ -61,9 +74,9 @@ def _get_router_logger() -> logging.Logger:
         logger.propagate = False
         return logger
 
-    log_dir = pathlib.Path.home() / f".{config.APP_NAME}" / "logs"
+    log_path = _resolve_log_path()
+    log_dir = log_path.parent
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "router.log"
 
     handler = logging.FileHandler(log_path, encoding="utf-8")
     handler.setLevel(logging.INFO)
