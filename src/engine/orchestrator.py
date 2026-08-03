@@ -107,9 +107,19 @@ async def create_local_agent(builder, subagent_callback=None, session_data=None,
             depth_token = delegation_depth_ctx.set(parent_depth + 1)
             token_setter = holds_token.set(True)
             child_results_token = child_results.set([])
+            # Initialised BEFORE the try so the finally block can never reference
+            # them unbound. The early return for an unknown sub-agent id fires
+            # before both of these were previously assigned, so the finally raised
+            # UnboundLocalError and MASKED the real error message (observed: the
+            # Orchestrator delegated to 'Analyzer', which is not in its own scoped
+            # sub-agents, and got "cannot access local variable 'quota_token'"
+            # instead of "Sub-agent named 'Analyzer' does not exist" —
+            # session_11b66ee0, 2026-08-03).
+            quota_token = None
+            children_token = None
             try:
                 current_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                
+
                 # Look up the target agent from the CALLER's available sub-agents (scoped, not global)
                 caller_sub_agents = available_sub_agents_ctx.get()
                 target_config = None
@@ -136,7 +146,7 @@ async def create_local_agent(builder, subagent_callback=None, session_data=None,
 
                 # Per-task web_calls budget: give this task its own quota context
                 # seeded with its allocated share, so tasks don't share one global pool.
-                quota_token = None
+                # (quota_token is initialised above the try, not here.)
                 if web_calls_budget is not None:
                     _parent_quota = tool_quotas_ctx.get()
                     if _parent_quota and "web_calls" in _parent_quota:
@@ -243,7 +253,8 @@ async def create_local_agent(builder, subagent_callback=None, session_data=None,
             finally:
                 if quota_token is not None:
                     tool_quotas_ctx.reset(quota_token)
-                available_sub_agents_ctx.reset(children_token)
+                if children_token is not None:
+                    available_sub_agents_ctx.reset(children_token)
                 child_results.reset(child_results_token)
                 holds_token.reset(token_setter)
                 delegation_depth_ctx.reset(depth_token)
