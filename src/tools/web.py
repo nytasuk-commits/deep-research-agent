@@ -480,6 +480,33 @@ async def web_search(
         except asyncio.TimeoutError:
             return "Search failed: timed out after 45 seconds. Try again or rephrase the query."
         except Exception as e:
+            # ddgs raises DDGSException("No results found.") for a genuinely EMPTY
+            # result set. See ddgs/ddgs.py line 454:
+            #     raise DDGSException(err or "No results found.")
+            # The `or` fallback means that exact message is used ONLY when no real
+            # error occurred — any actual failure populates `err` with different
+            # text, and genuine blocks raise RatelimitException instead. So an
+            # empty result set is a SUCCESSFUL search with zero hits, not a
+            # provider failure.
+            #
+            # Treating it as a failure cost 3 attempts plus 30s plus 60s of backoff
+            # per empty query, serialised under the shared _backoff_lock, and
+            # incremented _consecutive_search_failures until it falsely reported
+            # SEARCH SERVICE UNAVAILABLE. One sub-agent querying for local events
+            # that had no indexed results stalled an entire run this way
+            # (session_fd50dfab, 2026-08-03).
+            if str(e).strip() == "No results found.":
+                # The provider responded, so it is demonstrably healthy — reset the
+                # failure counter rather than leaving it elevated.
+                _consecutive_search_failures = 0
+                return (
+                    f"🔍 Found 0 result(s) for '{query}':\n\n"
+                    "The search provider returned no matches. This is a VALID EMPTY "
+                    "RESULT, not an error — search is working normally. Do NOT retry "
+                    "this same query. Either rephrase with broader or different "
+                    "terms, or conclude that no indexed source exists and report "
+                    "that as your finding."
+                )
             _consecutive_search_failures += 1
             if _consecutive_search_failures >= 6:
                 return ("SEARCH SERVICE UNAVAILABLE: the web search provider has returned errors "
