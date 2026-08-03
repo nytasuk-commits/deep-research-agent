@@ -88,21 +88,26 @@ def _check_repeat(tool_name: str, args: tuple, kwargs: dict) -> str | None:
             # Same args — increment count
             count += 1
             if count > _REPEAT_THRESHOLD:
-                # write_workspace_file is IDEMPOTENT: writing identical content to the
-                # same filename twice produces the same file — there is no runaway loop
+                # write_workspace_file and write_todos are IDEMPOTENT: writing identical content to the
+                # same target twice produces the same result — there is no runaway loop
                 # to break, and the second write is harmless. Aborting the run over a
                 # harmless identical re-write is itself the bug (observed: an identical
                 # second final_report.md write raised QuotaAbortException deep in a
                 # streaming tool call; the exception was not propagated out of the
                 # `async for` and orphaned the stream, producing an 8-hour hang).
-                # So do NOT abort on an identical repeat of write_workspace_file:
+                # So do NOT abort on an identical repeat of an idempotent writer:
                 # return a benign no-op success instead. Other tools still hard-abort.
-                if tool_name == "write_workspace_file":
+                # write_todos is idempotent for the same reason — rewriting the same
+                # list produces the same list — and aborting on it is worse, because
+                # the Orchestrator has no salvage path: an identical write_todos pair
+                # force-terminated an entire query at its first step before any
+                # research ran.
+                if tool_name in ("write_workspace_file", "write_todos"):
                     ctx["_last_call"] = {"sig": new_sig, "count": count}
-                    return ("Note: identical write_workspace_file call ignored — the "
-                            "file already contains exactly this content, so nothing "
-                            "changed. The file is saved. Do NOT write it again; proceed "
-                            "to your next step or end your turn.")
+                    return (f"Note: identical {tool_name} call ignored — the target "
+                            "already holds exactly this content, so nothing changed. "
+                            "It is saved. Do NOT write it again; proceed to your next "
+                            "step or end your turn.")
                 # Identical-consecutive call detected. A text error does not stop a
                 # model in a degenerate self-regeneration lock (it ignores the result
                 # entirely), so we hard-abort instead of returning another ignored

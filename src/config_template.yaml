@@ -1,5 +1,6 @@
 api:
-  openai_base_url: http://localhost:8080/v1
+  openai_base_urls:
+    - http://localhost:8080/v1
   openai_model: local-model
 settings:
   enable_thinking: false
@@ -8,7 +9,9 @@ settings:
   # editing the report text. Capped to guarantee termination. 2 is recommended.
   max_review_rounds: 2
   concurrency:
-    max_concurrent_tasks: 3
+    # Concurrency limit for ONE endpoint (machine). Global concurrency is
+    # derived at query start as: up_endpoint_count * per_endpoint_cap
+    per_endpoint_cap: 3
   quotas:
     # IMPORTANT: Quotas are GLOBAL (shared across ALL agents in the system).
     # Each key MUST be unique — duplicate YAML keys silently overwrite earlier ones!
@@ -38,7 +41,7 @@ settings:
     enabled: false
     overrides:
       concurrency:
-        max_concurrent_tasks: 1
+        per_endpoint_cap: 1
       quotas:
         web_calls:
           limit: 30
