@@ -48,7 +48,7 @@ searcher = SubAgentConfig(
 reviewer = SubAgentConfig(
     name="Reviewer",
     instructions=REVIEWER_SUBAGENT_INSTRUCTIONS,
-    tools=[read_workspace_file, grep_workspace_file, think_tool]
+    tools=[read_workspace_file, grep_workspace_file, list_workspace_files, think_tool]
 )
 
 # 3. Orchestrator — task management only, NO web, NO file reading
