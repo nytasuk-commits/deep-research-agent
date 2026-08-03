@@ -95,11 +95,18 @@ async def create_local_agent(builder, subagent_callback=None, session_data=None,
 
     holds_token = contextvars.ContextVar('holds_token', default=False)
 
+    # Per-task record of results this task's own delegate_tasks calls have already
+    # returned. Child findings come back as a tool RESULT, so they never reach the
+    # parent's `final_text`, which only accumulates c.type == "text". Without this,
+    # an abort throws away completed child work. Salvage-on-abort reads this list.
+    child_results = contextvars.ContextVar('child_results', default=None)
+
     async def _run_single_task(task_name: str, instructions: str, agent_id: str = None, web_calls_budget: int = None) -> str:
         async with sem:
             parent_depth = delegation_depth_ctx.get()
             depth_token = delegation_depth_ctx.set(parent_depth + 1)
             token_setter = holds_token.set(True)
+            child_results_token = child_results.set([])
             try:
                 current_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 
@@ -202,6 +209,14 @@ async def create_local_agent(builder, subagent_callback=None, session_data=None,
                                 _files = []
                             _salvage = f"## Partial result for {task_name}\n"
                             _salvage += f"(Task hit a quota limit and was stopped before returning a summary: {str(e)})\n\n"
+                            _child = child_results.get() or []
+                            if _child:
+                                _salvage += (
+                                    "### Completed sub-task results received before stopping\n"
+                                    "(These are verified findings already returned by sub-agents. "
+                                    "Use them directly. Do NOT re-research this material.)\n"
+                                )
+                                _salvage += "\n\n".join(_child) + "\n\n"
                             if final_text.strip():
                                 _salvage += f"### Findings gathered before stopping:\n{final_text}\n\n"
                             if _files:
@@ -229,6 +244,7 @@ async def create_local_agent(builder, subagent_callback=None, session_data=None,
                 if quota_token is not None:
                     tool_quotas_ctx.reset(quota_token)
                 available_sub_agents_ctx.reset(children_token)
+                child_results.reset(child_results_token)
                 holds_token.reset(token_setter)
                 delegation_depth_ctx.reset(depth_token)
 
@@ -286,8 +302,12 @@ async def create_local_agent(builder, subagent_callback=None, session_data=None,
                 final_output.append(f"## Error\nTask failed with exception: {res}\n---")
             else:
                 final_output.append(str(res))
-                
-        return "\n\n".join(final_output)
+
+        _joined = "\n\n".join(final_output)
+        _bucket = child_results.get()
+        if _bucket is not None:
+            _bucket.append(_joined)
+        return _joined
 
     # -------------------------------------------------------------
     # [!CAUTION] RULES FOR LLM CODING ASSISTANTS EDITING THIS:
