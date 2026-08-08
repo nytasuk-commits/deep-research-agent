@@ -136,7 +136,7 @@ def _check_repeat(tool_name: str, args: tuple, kwargs: dict) -> str | None:
                 # write_workspace_file and write_todos are IDEMPOTENT: writing identical content to the
                 # same target twice produces the same result — there is no runaway loop
                 # to break, and the second write is harmless. Aborting the run over a
-                # harmless identical re_write is itself the bug (observed: an identical
+                # harmless identical re-write is itself the bug (observed: an identical
                 # second final_report.md write raised QuotaAbortException deep in a
                 # streaming tool call; the exception was not propagated out of the
                 # `async for` and orphaned the stream, producing an 8-hour hang).
