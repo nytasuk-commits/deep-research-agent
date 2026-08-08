@@ -77,45 +77,59 @@ def read_workspace_file(filename: str, start_line: int = 1, end_line: int = -1) 
     try:
         content = get_workspace_file_content(filename)
         if content is None: return f"Error: '{filename}' not found."
-        
+
         lines = content.splitlines()
         total = len(lines)
-        
+
         max_lines = _get_tool_rule("read_workspace_file", "max_lines", 300)
-        
+
+        # Capture whether this is an unbounded request BEFORE end_line is reassigned
+        # Unbounded means: caller did not narrow the range (start_line <= 1 and original end_line == -1)
+        unbounded = (start_line <= 1 and end_line == -1)
+
         if end_line == -1: end_line = total
-            
+
         start = max(1, start_line)
         end = min(total, end_line)
-        
+
         if (end - start + 1) > max_lines:
             # First oversized read of a file: serve the first max_lines as a useful
             # slice rather than wasting the charged call. The agent gets content AND
             # the file length, then uses grep for the rest.
             #
-            # REPEAT oversized read of the SAME file: refuse. Serving the same slice
-            # again lets an agent loop on an identical unbounded read (observed: 40
-            # identical calls on one file in session_6b67a03d). Refusing forces the
-            # correct grep-then-targeted-read pattern.
+            # REPEAT oversized read of the SAME file: refuse ONLY for unbounded reads.
+            # Serving the same slice again lets an agent loop on an identical unbounded
+            # read (observed: 40 identical calls on one file in session_6b67a03d).
+            # Refusing forces the correct grep-then-targeted-read pattern.
+            #
+            # Bounded reads that exceed max_lines (e.g., lines 401-836 with max=400) are
+            # allowed: we serve max_lines from start_line and tell agent to continue.
             _ctx = tool_quotas_ctx.get()
             _sliced = None
             if isinstance(_ctx, dict):
                 _sliced = _ctx.setdefault("_sliced_files", set())
-            if _sliced is not None and filename in _sliced:
+            if _sliced is not None and filename in _sliced and unbounded:
                 return (f"Error: You have already been served the first {max_lines} lines of "
                         f"'{filename}' ({total} lines total). Requesting it again returns nothing new. "
                         f"You MUST now either call grep_workspace_file on this file to locate the "
                         f"content you need, or call read_workspace_file with explicit start_line and "
                         f"end_line bounds spanning no more than {max_lines} lines.")
-            if _sliced is not None:
+            if _sliced is not None and unbounded:
                 _sliced.add(filename)
+            # For bounded reads exceeding max_lines, serve max_lines from start_line
+            # without adding to _sliced_files
             end = min(total, start + max_lines - 1)
             chunk = "\n".join(lines[start - 1:end])
-            return (f"--- {filename} [Lines {start}-{end} of {total}] ---\n{chunk}\n\n"
-                    f"[NOTE: This file is {total} lines; you have been given lines {start}-{end}. "
-                    f"Do NOT request this file again without bounds — it will be refused. Use "
-                    f"grep_workspace_file on this file to locate content beyond line {end}, then "
-                    f"read only those line ranges.]")
+            if unbounded:
+                return (f"--- {filename} [Lines {start}-{end} of {total}] ---\n{chunk}\n\n"
+                        f"[NOTE: This file is {total} lines; you have been given lines {start}-{end}. "
+                        f"Do NOT request this file again without bounds — it will be refused. Use "
+                        f"grep_workspace_file on this file to locate content beyond line {end}, then "
+                        f"read only those line ranges.]")
+            else:
+                return (f"--- {filename} [Lines {start}-{end} of {total}] ---\n{chunk}\n\n"
+                        f"[NOTE: This file is {total} lines; you have been given lines {start}-{end}. "
+                        f"Request lines {end + 1} onward for the rest.]")
             
         chunk = "\n".join(lines[start - 1:end])
         return f"--- {filename} [Lines {start}-{end} of {total}] ---\n{chunk}"
