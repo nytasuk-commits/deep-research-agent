@@ -10,6 +10,10 @@ review_phase_ctx = contextvars.ContextVar('review_phase', default=False)
 # Repeat detection threshold: consecutive identical calls beyond this count are refused
 _REPEAT_THRESHOLD = 1
 
+# Window-based repeat detection for alternating patterns
+_WINDOW_SIZE = 12
+_WINDOW_REPEAT_THRESHOLD = 4
+
 _QUOTA_ALIASES = {
     "web_search": "web_calls",
     "fetch_url_to_workspace": "web_calls",
@@ -83,6 +87,35 @@ def _check_repeat(tool_name: str, args: tuple, kwargs: dict) -> str | None:
 
         curr_sig = last_call.get("sig")
         count = last_call.get("count", 0)
+
+        # Maintain a window of recent signatures to detect alternating patterns
+        recent_sigs = ctx.get("_recent_sigs", [])
+        recent_sigs.append(new_sig)
+        # Trim the list so it holds at most _WINDOW_SIZE entries
+        if len(recent_sigs) > _WINDOW_SIZE:
+            recent_sigs = recent_sigs[-_WINDOW_SIZE:]
+        # Count how many times new_sig appears in the trimmed list
+        sig_count = recent_sigs.count(new_sig)
+        ctx["_recent_sigs"] = recent_sigs
+
+        if sig_count > _WINDOW_REPEAT_THRESHOLD:
+            # For write_workspace_file and write_todos (idempotent tools), return a benign note
+            # instead of aborting — identical writes are harmless
+            if tool_name in ("write_workspace_file", "write_todos"):
+                ctx["_last_call"] = {"sig": new_sig, "count": 1}
+                ctx["_recent_sigs"] = [new_sig]  # Reset window for next cycle
+                return (f"Note: identical {tool_name} call ignored — the target "
+                        "already holds exactly this content, so nothing changed. "
+                        "It is saved. Do NOT write it again; proceed to your next "
+                        "step or end your turn.")
+            # Non-idempotent tool with repeated arguments in window
+            ctx["_last_call"] = {"sig": new_sig, "count": 1}
+            ctx["_recent_sigs"] = [new_sig]  # Reset window for next cycle
+            raise QuotaAbortException(
+                f"Agent trapped in identical-call loop: '{tool_name}' called with "
+                f"identical arguments {sig_count} times within a window of {_WINDOW_SIZE}. "
+                f"Force-terminating turn."
+            )
 
         if new_sig == curr_sig:
             # Same args — increment count
