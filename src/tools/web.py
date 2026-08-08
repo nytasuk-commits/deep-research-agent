@@ -304,6 +304,14 @@ async def fetch_url_to_workspace(url: str, filename: str, convert_to_md: bool = 
                 "Click the button below to continue shopping",
                 "Sorry, we can't find the page you are looking for",
                 "We had to rate limit your IP", "Too Many Requests",
+                "Automated bot check in progress",
+                "Sorry! Something has gone wrong",
+                "experiencing a technical difficulty",
+                "There isn't a GitHub Pages site here",
+                "The site configured at this address does not",
+                "The resource requested could not be found",
+                "the page you requested does not exist",
+                "This page isn't here",
             )
             if any(m.lower() in data.lower() for m in _block_markers):
                 return (f"BLOCKED: {url} returned a bot-challenge, access-denied, or error page instead of "
