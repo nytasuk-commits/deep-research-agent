@@ -185,7 +185,11 @@ class EndpointRouter:
         raw = AsyncOpenAI(
             base_url=state.url,
             api_key=os.getenv("OPENAI_API_KEY", "dummy"),
-            timeout=httpx.Timeout(1800.0, connect=15.0, read=300.0),
+            # read=900: the final report write is a single tool call whose argument
+            # can be 40KB+. Observed: a 418s report generation was killed by the old
+            # read=300 while LM Studio was still generating (server logged "Client
+            # disconnected"). The 1800s total timeout still bounds a hung endpoint.
+            timeout=httpx.Timeout(1800.0, connect=15.0, read=900.0),
         )
         state.raw = raw
         state.client = OpenAIChatCompletionClient(model=self._model, async_client=raw)
