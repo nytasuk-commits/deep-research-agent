@@ -1141,6 +1141,7 @@ class BasicTuiAgent(App):
                                   "do NOT delegate research/search/verify tasks to any agent other than the Reviewer. If the Reviewer flags "
                                   "a figure as unsourced or undated and you cannot source it from material ALREADY in the workspace, you MUST "
                                   "fix it by removing it or marking it unverified — never by researching it again and never by inventing data. "
+                                  "When you add a date marker to a figure, append ONLY the source and date in brackets directly after the existing figure — e.g. \"$799.00 (Newegg, fetched today)\". Do NOT repeat the figure inside the brackets and do NOT add a second copy of the number anywhere. "
                                   "3) then present your final summary reflecting the REVIEWED report.")
                     new_inputs = [current_input] if isinstance(current_input, str) else list(current_input)
                     new_inputs.append(Message("user", [{"type": "text", "text": inject_msg}]))
@@ -1492,6 +1493,7 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
                               "do NOT delegate research/search/verify tasks to any agent other than the Reviewer. If the Reviewer flags "
                               "a figure as unsourced or undated and you cannot source it from material ALREADY in the workspace, you MUST "
                               "fix it by removing it or marking it unverified — never by researching it again and never by inventing data. "
+                              "When you add a date marker to a figure, append ONLY the source and date in brackets directly after the existing figure — e.g. \"$799.00 (Newegg, fetched today)\". Do NOT repeat the figure inside the brackets and do NOT add a second copy of the number anywhere. "
                               "3) only then present your final summary, which must reflect the REVIEWED report.")
 
                 new_inputs = [current_input] if isinstance(current_input, str) else list(current_input)
