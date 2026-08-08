@@ -14,6 +14,9 @@ _REPEAT_THRESHOLD = 1
 _WINDOW_SIZE = 12
 _WINDOW_REPEAT_THRESHOLD = 4
 
+# Read-only inspection tools that should not be force-terminated on identical calls
+_READ_ONLY_TOOLS = ("grep_workspace_file", "read_workspace_file", "list_workspace_files", "read_todos")
+
 _QUOTA_ALIASES = {
     "web_search": "web_calls",
     "fetch_url_to_workspace": "web_calls",
@@ -121,10 +124,19 @@ def _check_repeat(tool_name: str, args: tuple, kwargs: dict) -> str | None:
             # Same args — increment count
             count += 1
             if count > _REPEAT_THRESHOLD:
+                # Read-only inspection tools: instead of aborting, return a benign note.
+                # Two identical greps is plausible non-pathological behaviour (e.g., Reviewer
+                # checking the same file twice with different context), not a degenerate loop.
+                if tool_name in _READ_ONLY_TOOLS:
+                    ctx["_last_call"] = {"sig": new_sig, "count": count}
+                    return (f"Note: identical {tool_name} call ignored — same arguments as previous "
+                            f"call and the result was the same. Do NOT repeat this call; either "
+                            "change your arguments or move on to your next step.")
+
                 # write_workspace_file and write_todos are IDEMPOTENT: writing identical content to the
                 # same target twice produces the same result — there is no runaway loop
                 # to break, and the second write is harmless. Aborting the run over a
-                # harmless identical re-write is itself the bug (observed: an identical
+                # harmless identical re_write is itself the bug (observed: an identical
                 # second final_report.md write raised QuotaAbortException deep in a
                 # streaming tool call; the exception was not propagated out of the
                 # `async for` and orphaned the stream, producing an 8-hour hang).
