@@ -5,7 +5,7 @@ from tools.fs import _get_workspace_type, _get_workspace_dir, get_workspace_file
 
 @tool
 @with_quota
-def write_todos(todos: str) -> str:
+def write_todos(todos: str, named_entities: list[str] | None = None) -> str:
     """Write or update a todo list for the orchestrator task.
 
     Use this to track your plan and mark items as completed.
@@ -20,7 +20,54 @@ def write_todos(todos: str) -> str:
 
     Args:
         todos: The full todo list string with checkboxes to save.
+        named_entities: If the query explicitly names specific entities to
+            research or compare (e.g. a list of models, products, or options),
+            pass the exact list of those entity names here. Each named entity
+            MUST have its OWN separate todo line; you must NOT combine two or
+            more named entities into a single todo. This list is validated:
+            if any named entities are missing a dedicated todo, or two or more
+            are combined onto one line, the write is REJECTED and you must redo
+            the list with one todo per named entity.
     """
+    # --- Named-entity collapse guard ---
+    # The orchestrator has repeatedly collapsed multiple named entities into
+    # dimensional todos (e.g. "memory requirements for each model: A, B, C..."),
+    # which defeats per-entity budget allocation and silently drops entities.
+    # If named_entities are declared, enforce one dedicated todo line per entity
+    # and reject any line that combines two or more of them.
+    if named_entities:
+        entities = [e.strip() for e in named_entities if e and e.strip()]
+        if entities:
+            todo_lines = [ln for ln in todos.splitlines()
+                          if ln.strip().startswith("- [")]
+            lower_lines = [ln.lower() for ln in todo_lines]
+
+            # 1. Every named entity must appear in at least one todo line.
+            missing = [e for e in entities
+                       if not any(e.lower() in ln for ln in lower_lines)]
+            if missing:
+                return ("Error: TODO list REJECTED — not written. The following "
+                        "mandatory named entities have NO todo of their own: "
+                        + ", ".join(missing) + ". You MUST create ONE separate "
+                        "todo per named entity. Redo write_todos with a dedicated "
+                        "'- [ ]' line for each named entity, then continue.")
+
+            # 2. No single todo line may contain two or more named entities
+            #    (that is the collapse we are preventing).
+            collapsed = []
+            for ln, low in zip(todo_lines, lower_lines):
+                hits = [e for e in entities if e.lower() in low]
+                if len(hits) >= 2:
+                    collapsed.append(ln.strip())
+            if collapsed:
+                return ("Error: TODO list REJECTED — not written. These todo "
+                        "lines combine MULTIPLE named entities into one todo, "
+                        "which is forbidden: " + " || ".join(collapsed) + ". "
+                        "Each named entity is a MANDATORY separate deliverable. "
+                        "Redo write_todos with ONE todo per named entity — do "
+                        "NOT bundle entities together under a shared dimensional "
+                        "todo (e.g. 'memory for each model: A, B, C').")
+
     try:
         from tools.fs import _get_safe_path
         path = _get_safe_path("_todos.md")

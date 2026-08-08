@@ -18,7 +18,7 @@ import sys
 import argparse
 from pathlib import Path
 import pyfiglet
-from tools import tool_quotas_ctx, WORKSPACE_TOOLS, get_workspace_files, get_workspace_file_content
+from tools import tool_quotas_ctx, WORKSPACE_TOOLS, get_workspace_files, get_workspace_file_content, QuotaAbortException
 
 AGENT_NAME = config.APP_TITLE
 AGENT_DESCRIPTION = config.APP_DESCRIPTION
@@ -438,8 +438,9 @@ class BasicTuiAgent(App):
             ascii_art = pyfiglet.figlet_format(AGENT_NAME, font="doom")
         except Exception:
             ascii_art = AGENT_NAME + "\n"
-            
-        endpoint = config.cfg["api"]["openai_base_url"]
+
+        _eps = config.cfg.get("api", {}).get("openai_base_urls", [])
+        endpoint = ", ".join(_eps) if _eps else "Unknown"
         model = config.cfg["api"]["openai_model"]
         thinking = "ON" if config.cfg["settings"]["enable_thinking"] else "OFF"
         thinking_color = "green" if config.cfg["settings"]["enable_thinking"] else "red"
@@ -484,6 +485,10 @@ class BasicTuiAgent(App):
             # Deferred to after mount completes: starting the worker mid-mount runs it
             # in a different context and breaks the agent framework's contextvar teardown.
             self.set_timer(0.1, lambda: self.run_agent("Hello", show_user_message=False))
+
+    async def on_unmount(self) -> None:
+        from engine.router import aclose_router
+        await aclose_router()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if getattr(self, "_file_picker_active", False) or getattr(self, "_session_picker_active", False):
@@ -652,13 +657,13 @@ class BasicTuiAgent(App):
             _current_session_id = sid
             _current_call_by_source.clear()
             _current_text_by_source.clear()
-            
+
             orchestrator_module.reset_session()
             if state_dict:
-                orchestrator_module.create_local_agent(builder=self.builder, session_data=state_dict)
+                await orchestrator_module.create_local_agent(builder=self.builder, session_data=state_dict)
             else:
-                orchestrator_module.create_local_agent(builder=self.builder)
-                
+                await orchestrator_module.create_local_agent(builder=self.builder)
+
             await self.reconstruct_ui_from_events(ui_events)
             
             chat.mount(Static(Markdown(f"**System:**\nSession `{sid}` restored successfully!"), classes="agent-bubble"))
@@ -976,9 +981,15 @@ class BasicTuiAgent(App):
                 
             if update or is_done:
                 await self.handle_agent_update(update, subagent_states[aname], chat, is_subagent=is_subagent, agent_name=aname, is_done=is_done)
-            
+
+        async def notify_callback(msg: str) -> None:
+            """Mount each priming message as a system bubble in the chat container."""
+            chat = self.query_one("#chat-container", VerticalScroll)
+            chat.mount(Static(Markdown(f"**System:**\n{msg}"), classes="agent-bubble"))
+            chat.scroll_end(animate=False)
+
         # Create agent (re-reads config) and get session (None if conversational memory disabled)
-        agent, session = create_local_agent(builder=self.builder, subagent_callback=ui_callback)
+        agent, session = await create_local_agent(builder=self.builder, subagent_callback=ui_callback, notify=notify_callback)
         current_input = query
         has_requests = True
         enforced_review_check = False
@@ -1014,6 +1025,23 @@ class BasicTuiAgent(App):
                 _write_log()
 
 
+            except QuotaAbortException as e:
+                # Stop any tool-call spinner left running when the abort fired. The
+                # loop-breaker raises mid tool call, so that call's spinner never
+                # receives its completion event and would otherwise keep counting up
+                # forever, making a cleanly-aborted turn look like it is still running.
+                for _cw in state.get("calls", {}).values():
+                    if not getattr(_cw, "_done", False):
+                        _cw.mark_stopped()
+                p_widget = state.get("processing_widget")
+                if p_widget:
+                    p_widget.mark_error(f"Aborted: {str(e)}")
+                    state["processing_widget"] = None
+                else:
+                    chat.mount(Static(f"[red][System] Task forcefully aborted: {str(e)}[/red]", classes="agent-bubble"))
+                chat.scroll_end(animate=False)
+                _write_log()
+                break
             except Exception as e:
                 p_widget = state.get("processing_widget")
                 if p_widget:
@@ -1108,8 +1136,12 @@ class BasicTuiAgent(App):
                     self._safe_scroll_end(chat)
                     inject_msg = ("SYSTEM: You have written final_report.md but it has not been reviewed. Do NOT present results as final. "
                                   "You MUST now: 1) call delegate_tasks with agent_id 'Reviewer' and instructions to review the file "
-                                  "'final_report.md'; 2) fix every violation it reports by rewriting final_report.md (fix by removing or "
-                                  "marking claims as unverified, never by inventing data); 3) then present your final summary reflecting the REVIEWED report.")
+                                  "'final_report.md'; 2) fix every violation it reports by EDITING THE EXISTING final_report.md TEXT ONLY. "
+                                  "At this review stage you MUST NOT launch any new research: do NOT call web_search, do NOT fetch URLs, and "
+                                  "do NOT delegate research/search/verify tasks to any agent other than the Reviewer. If the Reviewer flags "
+                                  "a figure as unsourced or undated and you cannot source it from material ALREADY in the workspace, you MUST "
+                                  "fix it by removing it or marking it unverified — never by researching it again and never by inventing data. "
+                                  "3) then present your final summary reflecting the REVIEWED report.")
                     new_inputs = [current_input] if isinstance(current_input, str) else list(current_input)
                     new_inputs.append(Message("user", [{"type": "text", "text": inject_msg}]))
                     current_input = new_inputs
@@ -1236,7 +1268,7 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
 
     async def cli_subagent_callback(update, is_subagent=True, is_done=False, **kwargs):
         agent_name = kwargs.get("agent_name") or getattr(update, "author_name", None) or "Sub-Agent"
-        
+
         requests = kwargs.get("approval_requests", [])
         if requests:
             from agent_framework import Message
@@ -1249,14 +1281,14 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
                     sys.stdout.write(f"\n\033[91m[{agent_name}] Denied {req.function_call.name} (Auto-approve disabled).\033[0m\n")
                 responses.append(Message("user", [req.to_function_approval_response(is_approved)]))
             return responses
-            
+
         if is_done:
             sys.stdout.write(f"\n\033[92m[{agent_name}] Finished.\033[0m\n")
             return
-            
+
         if update is None:
             return
-            
+
         for content in update.contents:
             if content.type == "text" and content.text:
                 log_stream_content(agent_name, "text", {"text": content.text})
@@ -1276,6 +1308,10 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
                                 "call_id": call_id, "result": str(result)
                             })
                             # Detect the draft report being written -> demand review immediately
+
+    async def cli_notify(msg: str) -> None:
+        sys.stdout.write(f"\n\033[93m[Router] {msg}\033[0m\n")
+        sys.stdout.flush()
 
     session_data = None
     if session_id:
@@ -1310,7 +1346,7 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
     elif prompt:
         log_prompt(prompt)
 
-    agent, session = create_local_agent(builder=builder, subagent_callback=cli_subagent_callback, session_data=session_data)
+    agent, session = await create_local_agent(builder=builder, subagent_callback=cli_subagent_callback, session_data=session_data, notify=cli_notify)
 
     if prompt_file:
         try:
@@ -1330,7 +1366,7 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
     workspace_dir = config.cfg.get("settings", {}).get("workspace", {}).get("dir", ".")
     workspace_disp = f"Disk ({workspace_dir})" if workspace_type == "disk" else "In-Memory"
     
-    endpoint = config.cfg.get("api", {}).get("openai_base_url", "Unknown")
+    endpoint = ", ".join(config.cfg.get("api", {}).get("openai_base_urls", [])) if config.cfg.get("api", {}).get("openai_base_urls") else "Unknown"
     model = config.cfg.get("api", {}).get("openai_model", "Unknown")
     
     thinking = "ON" if config.cfg.get("settings", {}).get("enable_thinking", False) else "OFF"
@@ -1365,7 +1401,7 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
         enforced_review_check = False
         report_just_written = False
         review_rounds = 0
-        _MAX_REVIEW_ROUNDS = 2
+        _MAX_REVIEW_ROUNDS = config.cfg["settings"].get("max_review_rounds", 2)
 
         while has_requests:
             has_requests = False
@@ -1439,29 +1475,6 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
                     except Exception as e:
                         pass
 
-            if not has_requests and not enforced_artifact_check:
-                req_artifact = config.cfg.get("settings", {}).get("workspace", {}).get("required_artifact", None)
-                if req_artifact:
-                    from tools.fs import get_workspace_files
-                    try:
-                        # get_workspace_files returns a list of filenames
-                        files = get_workspace_files()
-                        if req_artifact not in files:
-                            has_requests = True
-                            enforced_artifact_check = True
-                            
-                            warning_msg = f"\n\033[91m[System] WARNING: Required artifact '{req_artifact}' is missing from the workspace. Pushing agent to create it.\033[0m\n"
-                            sys.stdout.write(warning_msg)
-                            log_stream_content("Agent", "text", {"text": warning_msg})
-                            
-                            inject_msg = f"SYSTEM WARNING: You are attempting to finish the task, but the required final artifact '{req_artifact}' is missing from the workspace. You MUST create this file to successfully complete the task."
-                            
-                            new_inputs = [current_input] if isinstance(current_input, str) else list(current_input)
-                            new_inputs.append(Message("user", [{"type": "text", "text": inject_msg}]))
-                            current_input = new_inputs
-                    except Exception as e:
-                        pass
-
             if report_just_written and review_rounds < _MAX_REVIEW_ROUNDS:
                 report_just_written = False
                 review_rounds += 1
@@ -1474,9 +1487,12 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
 
                 inject_msg = ("SYSTEM: You have just written final_report.md. Do NOT summarize or present results to the user yet. "
                               "You MUST now: 1) call delegate_tasks with agent_id 'Reviewer' and instructions to review the file "
-                              "'final_report.md'; 2) fix every violation it reports by rewriting final_report.md (fix by removing or "
-                              "marking claims as unverified, never by inventing data); 3) only then present your final summary, which "
-                              "must reflect the REVIEWED report.")
+                              "'final_report.md'; 2) fix every violation it reports by EDITING THE EXISTING final_report.md TEXT ONLY. "
+                              "At this review stage you MUST NOT launch any new research: do NOT call web_search, do NOT fetch URLs, and "
+                              "do NOT delegate research/search/verify tasks to any agent other than the Reviewer. If the Reviewer flags "
+                              "a figure as unsourced or undated and you cannot source it from material ALREADY in the workspace, you MUST "
+                              "fix it by removing it or marking it unverified — never by researching it again and never by inventing data. "
+                              "3) only then present your final summary, which must reflect the REVIEWED report.")
 
                 new_inputs = [current_input] if isinstance(current_input, str) else list(current_input)
                 new_inputs.append(Message("user", [{"type": "text", "text": inject_msg}]))
@@ -1493,6 +1509,11 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
         if session_token is not None:
             from tools.fs import session_dir_ctx
             session_dir_ctx.reset(session_token)
+        try:
+            from engine.router import aclose_router
+            await aclose_router()
+        except Exception:
+            pass
 
 def cli_main(builder):
     parser = argparse.ArgumentParser(description="Basic Agent TUI / CLI Scaffold")

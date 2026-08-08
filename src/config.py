@@ -19,13 +19,13 @@ _CONFIG_PATH = _get_config_path_from_args() or os.path.join(_DEFAULT_CONFIG_DIR,
 
 _DEFAULTS = {
     "api": {
-        "openai_base_url": "http://localhost:8080/v1",
+        "openai_base_urls": ["http://localhost:8080/v1"],
         "openai_model": "local-model",
     },
     "settings": {
         "enable_thinking": False,
         "concurrency": {
-            "max_concurrent_tasks": 1
+            "per_endpoint_cap": 1
         },
         "quotas": {},
         "workspace": {
@@ -51,7 +51,7 @@ def load_config() -> dict:
     """Load config from YAML file, falling back to defaults for missing keys."""
     global cfg
     file_cfg = {}
-    
+
     if not os.path.exists(_CONFIG_PATH):
         bundled_config = os.path.join(os.path.dirname(__file__), "config_template.yaml")
         os.makedirs(os.path.dirname(_CONFIG_PATH), exist_ok=True)
@@ -65,7 +65,7 @@ def load_config() -> dict:
     if os.path.exists(_CONFIG_PATH):
         with open(_CONFIG_PATH, "r") as f:
             file_cfg = yaml.safe_load(f) or {}
-            
+
     cfg = _deep_merge(_DEFAULTS, file_cfg)
 
     # Expand APP_NAME placeholder and tilde (~) in workspace directory
@@ -84,22 +84,55 @@ def load_config() -> dict:
             cfg["settings"] = _deep_merge(cfg["settings"], overrides)
             print("[config] FAST-TEST MODE ACTIVE — quotas reduced", file=sys.stderr)
 
-    # Overlay API keys from environment if set (env takes priority for secrets)
-    if os.environ.get("OPENAI_API_BASE"):
-        cfg["api"]["openai_base_url"] = os.environ["OPENAI_API_BASE"]
-    if os.environ.get("OPENAI_MODEL"):
+    # Overlay API keys from environment if set.
+    # Env vars are used ONLY if the corresponding value in config is still at its default.
+    # This makes config.yaml the primary source, with env vars as fallbacks for unset values.
+    if os.environ.get("OPENAI_MODEL") and cfg["api"]["openai_model"] == _DEFAULTS["api"]["openai_model"]:
         cfg["api"]["openai_model"] = os.environ["OPENAI_MODEL"]
+
+    # --- Normalise endpoint URL list ---
+    # `openai_base_urls` is the single source of truth for endpoints.
+    # Accept a bare string as a one-element list (operator convenience),
+    # drop blanks, and strip whitespace. Order is preserved.
+    api_cfg = cfg.setdefault("api", {})
+    raw_urls = api_cfg.get("openai_base_urls")
+    if isinstance(raw_urls, str):
+        raw_urls = [raw_urls]
+    if not isinstance(raw_urls, list):
+        raw_urls = []
+    urls = []
+    for u in raw_urls:
+        if isinstance(u, str) and u.strip():
+            s = u.strip()
+            if s not in urls:
+                urls.append(s)
+    if not urls:
+        raise ValueError(
+            "config error: api.openai_base_urls must contain at least one "
+            "endpoint URL (e.g. http://192.168.68.69:1234/v1)"
+        )
+    api_cfg["openai_base_urls"] = urls
+
+    # per_endpoint_cap must be a positive int
+    conc = cfg.setdefault("settings", {}).setdefault("concurrency", {})
+    cap = conc.get("per_endpoint_cap", 1)
+    if not isinstance(cap, int) or cap < 1:
+        raise ValueError(
+            f"config error: settings.concurrency.per_endpoint_cap must be a "
+            f"positive integer, got {cap!r}"
+        )
+    conc["per_endpoint_cap"] = cap
 
     return cfg
 
 def save_config() -> None:
     """Persist the current config dict back to config.yaml."""
     save_data = copy.deepcopy(cfg)
-    
+
     # Strip out sensitive API keys before writing if any are stored in keys
     if "api" in save_data:
         save_data["api"].pop("openai_api_key", None)
-        
+
     with open(_CONFIG_PATH, "w") as f:
         yaml.dump(save_data, f, default_flow_style=False, sort_keys=False)
 

@@ -1,6 +1,6 @@
 # Reviewer Passes Without Catching Substantive Errors
 
-**Status:** Open
+**Status:** Downgraded — not reproduced on session ecf57d30 (Reviewer caught 4 substantive violations incl. the bandwidth conflict). Single past observation only; re-open if the framing-mismatch pass recurs.
 **Type:** Bug
 **Source:** Observed in run
 

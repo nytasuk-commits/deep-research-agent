@@ -118,6 +118,19 @@ def get_ddgs_client():
 @with_quota
 async def fetch_url_to_workspace(url: str, filename: str, convert_to_md: bool = True) -> str:
     """Fetch external web content and save it directly to the workspace. If convert_to_md is True, parses to Markdown."""
+    # Reset the search-since-fetch counter on every fetch ATTEMPT (success or
+    # failure). A fetch attempt means the Searcher is acting on results it found,
+    # which is the behaviour the ratio guard exists to force. Resetting on attempt
+    # (not just success) prevents a deadlock where all fetches fail, the counter
+    # never clears, and searching stays blocked with no valid move left.
+    try:
+        from tools.core import tool_quotas_ctx as _tq_ctx
+        _rc = _tq_ctx.get()
+        if isinstance(_rc, dict):
+            _rc["_searches_since_fetch"] = 0
+    except Exception:
+        pass
+
     import config as app_config
 
     # Per-run dedup reset — prunes stale runs, keeps memory bounded
@@ -387,10 +400,36 @@ async def web_search(
     Returns:
         Formatted search results with titles, URLs, and snippets
     """
-    from tools.core import check_quota
+    from tools.core import check_quota, tool_quotas_ctx
     quota_error = check_quota("web_search")
     if quota_error:
         return quota_error
+
+    # --- Search-to-fetch ratio guard ---
+    # Prevents a task from spending its whole web_calls budget on searches while
+    # holding fetchable results (observed: Qwen3-Next ran ~20 searches, never
+    # fetched, exhausted its budget, and the found source was never saved).
+    # A "research unit" is ~1 search + up to 5 fetches = 6 calls, so a task may
+    # run at most floor(quota / 6) searches since its last fetch ATTEMPT. Any
+    # fetch attempt (success or failure) resets the counter, so a task whose
+    # fetches all fail is never deadlocked. The existing capacity/reserve check
+    # owns the low-budget case, so this guard only fires while fetch budget remains.
+    try:
+        _ctx = tool_quotas_ctx.get()
+        if isinstance(_ctx, dict) and "web_calls" in _ctx:
+            _task_quota = _ctx["web_calls"].get("limit", 0)
+            _ceiling = max(1, _task_quota // 6)
+            _since = _ctx.get("_searches_since_fetch", 0)
+            if _since >= _ceiling:
+                return (
+                    f"Error: SEARCH BLOCKED — you have run {_since} searches since your "
+                    f"last fetch, which is the limit for this task (quota {_task_quota} / 6 "
+                    f"= {_ceiling}). You already have search results in hand. You MUST now "
+                    f"FETCH the best result(s) you have found before searching again."
+                )
+            _ctx["_searches_since_fetch"] = _since + 1
+    except Exception:
+        pass
         
     def _do_search():
         from ddgs import DDGS
@@ -441,6 +480,33 @@ async def web_search(
         except asyncio.TimeoutError:
             return "Search failed: timed out after 45 seconds. Try again or rephrase the query."
         except Exception as e:
+            # ddgs raises DDGSException("No results found.") for a genuinely EMPTY
+            # result set. See ddgs/ddgs.py line 454:
+            #     raise DDGSException(err or "No results found.")
+            # The `or` fallback means that exact message is used ONLY when no real
+            # error occurred — any actual failure populates `err` with different
+            # text, and genuine blocks raise RatelimitException instead. So an
+            # empty result set is a SUCCESSFUL search with zero hits, not a
+            # provider failure.
+            #
+            # Treating it as a failure cost 3 attempts plus 30s plus 60s of backoff
+            # per empty query, serialised under the shared _backoff_lock, and
+            # incremented _consecutive_search_failures until it falsely reported
+            # SEARCH SERVICE UNAVAILABLE. One sub-agent querying for local events
+            # that had no indexed results stalled an entire run this way
+            # (session_fd50dfab, 2026-08-03).
+            if str(e).strip() == "No results found.":
+                # The provider responded, so it is demonstrably healthy — reset the
+                # failure counter rather than leaving it elevated.
+                _consecutive_search_failures = 0
+                return (
+                    f"🔍 Found 0 result(s) for '{query}':\n\n"
+                    "The search provider returned no matches. This is a VALID EMPTY "
+                    "RESULT, not an error — search is working normally. Do NOT retry "
+                    "this same query. Either rephrase with broader or different "
+                    "terms, or conclude that no indexed source exists and report "
+                    "that as your finding."
+                )
             _consecutive_search_failures += 1
             if _consecutive_search_failures >= 6:
                 return ("SEARCH SERVICE UNAVAILABLE: the web search provider has returned errors "

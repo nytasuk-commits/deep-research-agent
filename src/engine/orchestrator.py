@@ -5,10 +5,11 @@ import copy
 from agent_framework.openai import OpenAIChatCompletionClient
 from agent_framework import tool, AgentSession
 from tools import WORKSPACE_TOOLS, tool_quotas_ctx, with_quota, think_tool, QuotaAbortException
-from prompts import ORCHESTRATOR_INSTRUCTIONS, SUBAGENT_INSTRUCTIONS, SUBAGENT_DELEGATION_INSTRUCTIONS
+from prompts import ORCHESTRATOR_INSTRUCTIONS, SUBAGENT_INSTRUCTIONS, SUBAGENT_DELEGATION_INSTRUCTIONS, DELEGATED_TASK_INTEGRITY_CONTRACT
 import datetime
 import config
 import contextvars
+from engine.router import get_router
 
 # Module-level session for conversational memory persistence
 _session = None
@@ -58,32 +59,25 @@ def _safe_format(template: str, **kwargs) -> str:
 def _get_default_options():
     options = {"temperature": 0.0}
     # OpenAI's official API rejects "chat_template_kwargs"
-    if "api.openai.com" not in config.cfg.get("api", {}).get("openai_base_url", ""):
+    _urls = config.cfg.get("api", {}).get("openai_base_urls", [])
+    if not any("api.openai.com" in u for u in _urls):
         options["extra_body"] = {
             "chat_template_kwargs": {"enable_thinking": config.cfg["settings"].get("enable_thinking", False)}
         }
     return options
 
-def _build_client():
-    from openai import AsyncOpenAI
-    import httpx
-    _async_client = AsyncOpenAI(
-        base_url=config.cfg["api"]["openai_base_url"],
-        api_key=os.getenv("OPENAI_API_KEY", "dummy"),
-        timeout=httpx.Timeout(1800.0, connect=15.0, read=300.0)
-    )
-    return OpenAIChatCompletionClient(
-        model=config.cfg["api"]["openai_model"],
-        async_client=_async_client
-    )
-
-def create_local_agent(builder, subagent_callback=None, session_data=None):
+async def create_local_agent(builder, subagent_callback=None, session_data=None, notify=None):
     """
     Returns (agent, session). Session is None when conversational memory is disabled.
     Agent is re-created each call to pick up config changes (thinking toggle).
+
+    This function is now async and takes a `notify` argument - an optional async
+    callable used to surface one priming message per endpoint during router initialization.
     """
     global _session
-    client = _build_client()
+    router = get_router()
+    await router.snapshot_and_prime(notify=notify)
+    client = router.orchestrator_client()
     
     # -------------------------------------------------------------
     # SDK Bounded Dispatcher
@@ -95,19 +89,37 @@ def create_local_agent(builder, subagent_callback=None, session_data=None):
     # -------------------------------------------------------------
     # -------------------------------------------------------------
     # Bounded Concurrent Sub-Agent Dispatcher
-    # Utilizes inherited contextvars for shared cumulative quotas to prevent limit overruns.
-    sem = asyncio.Semaphore(config.cfg.get("settings", {}).get("concurrency", {}).get("max_concurrent_tasks", 1))
+    # The semaphore size is derived from the router's start-of-query health snapshot:
+    # global_concurrency = (up_endpoint_count) * per_endpoint_cap, fixed for this query.
+    sem = asyncio.Semaphore(router.current_concurrency())
 
     holds_token = contextvars.ContextVar('holds_token', default=False)
+
+    # Per-task record of results this task's own delegate_tasks calls have already
+    # returned. Child findings come back as a tool RESULT, so they never reach the
+    # parent's `final_text`, which only accumulates c.type == "text". Without this,
+    # an abort throws away completed child work. Salvage-on-abort reads this list.
+    child_results = contextvars.ContextVar('child_results', default=None)
 
     async def _run_single_task(task_name: str, instructions: str, agent_id: str = None, web_calls_budget: int = None) -> str:
         async with sem:
             parent_depth = delegation_depth_ctx.get()
             depth_token = delegation_depth_ctx.set(parent_depth + 1)
             token_setter = holds_token.set(True)
+            child_results_token = child_results.set([])
+            # Initialised BEFORE the try so the finally block can never reference
+            # them unbound. The early return for an unknown sub-agent id fires
+            # before both of these were previously assigned, so the finally raised
+            # UnboundLocalError and MASKED the real error message (observed: the
+            # Orchestrator delegated to 'Analyzer', which is not in its own scoped
+            # sub-agents, and got "cannot access local variable 'quota_token'"
+            # instead of "Sub-agent named 'Analyzer' does not exist" —
+            # session_11b66ee0, 2026-08-03).
+            quota_token = None
+            children_token = None
             try:
                 current_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                
+
                 # Look up the target agent from the CALLER's available sub-agents (scoped, not global)
                 caller_sub_agents = available_sub_agents_ctx.get()
                 target_config = None
@@ -134,7 +146,7 @@ def create_local_agent(builder, subagent_callback=None, session_data=None):
 
                 # Per-task web_calls budget: give this task its own quota context
                 # seeded with its allocated share, so tasks don't share one global pool.
-                quota_token = None
+                # (quota_token is initialised above the try, not here.)
                 if web_calls_budget is not None:
                     _parent_quota = tool_quotas_ctx.get()
                     if _parent_quota and "web_calls" in _parent_quota:
@@ -152,7 +164,7 @@ def create_local_agent(builder, subagent_callback=None, session_data=None):
                         task_name=task_name,
                         workspace_dir=config.cfg.get("settings", {}).get("workspace", {}).get("dir", "."),
                         delegation_instructions=SUBAGENT_DELEGATION_INSTRUCTIONS.format(
-                            max_concurrency=config.cfg.get("settings", {}).get("concurrency", {}).get("max_concurrent_tasks", 1)
+                            max_concurrency=router.current_concurrency()
                         ),
                         **_get_quota_format_vars()
                     )
@@ -163,70 +175,87 @@ def create_local_agent(builder, subagent_callback=None, session_data=None):
                         task_name=task_name,
                         workspace_dir=config.cfg.get("settings", {}).get("workspace", {}).get("dir", "."),
                         delegation_instructions=SUBAGENT_DELEGATION_INSTRUCTIONS.format(
-                            max_concurrency=config.cfg.get("settings", {}).get("concurrency", {}).get("max_concurrent_tasks", 1)
+                            max_concurrency=router.current_concurrency()
                         ),
                         **_get_quota_format_vars()
                     )
 
-                sub_agent = client.as_agent(
-                    name=_sanitize_name(f"SubAgent_{task_name}"),
-                    instructions=sub_instr,
-                    tools=sub_tools,
-                    default_options=_get_default_options()
-                )
-                final_text = ""
-                current_input = instructions
-                has_requests = True
-                while has_requests:
-                    has_requests = False
-                    user_input_requests = []
-                    
-                    try:
-                        stream = sub_agent.run(current_input, stream=True)
-                        async for update in stream:
-                            if subagent_callback:
-                                await subagent_callback(update, is_subagent=True, agent_name=f"SubAgent_{task_name}")
-                            for c in update.contents:
-                                if c.type == "text" and c.text:
-                                    final_text += c.text
-                                    
-                            if getattr(update, "user_input_requests", None):
-                                user_input_requests.extend(update.user_input_requests)
-                    except QuotaAbortException as e:
-                        from tools.fs import get_workspace_files
-                        try:
-                            _files = get_workspace_files()
-                        except Exception:
-                            _files = []
-                        _salvage = f"## Partial result for {task_name}\n"
-                        _salvage += f"(Task hit a quota limit and was stopped before returning a summary: {str(e)})\n\n"
-                        if final_text.strip():
-                            _salvage += f"### Findings gathered before stopping:\n{final_text}\n\n"
-                        if _files:
-                            _salvage += "### Files already fetched to the workspace — delegate an Analyzer to read these for content:\n"
-                            _salvage += "\n".join(f"- {f}" for f in _files) + "\n"
-                        _salvage += "---"
-                        return _salvage
-                            
-                    if user_input_requests:
-                        has_requests = True
-                        responses = []
-                        if subagent_callback:
-                            responses = await subagent_callback(None, is_subagent=True, agent_name=f"SubAgent_{task_name}", approval_requests=user_input_requests)
-                            
-                        new_inputs = [current_input] if isinstance(current_input, str) else list(current_input)
-                        if responses:
-                            new_inputs.extend(responses)
-                        current_input = new_inputs
-                        
-                if subagent_callback:
-                    await subagent_callback(None, is_subagent=True, agent_name=f"SubAgent_{task_name}", is_done=True)
+                # Route the sub-agent through the router; its endpoint's in-flight counter
+                # covers the whole task execution.
+                async with router.acquire(task_name=task_name) as _task_client:
+                    sub_agent = _task_client.as_agent(
+                        name=_sanitize_name(f"SubAgent_{task_name}"),
+                        instructions=sub_instr,
+                        tools=sub_tools,
+                        default_options=_get_default_options()
+                    )
+                    final_text = ""
+                    # Mechanically prepend the integrity contract to EVERY delegated task,
+                    # so an agent-initiated call carries the same non-negotiable integrity
+                    # rules as a code-initiated one. The delegating agent cannot omit or
+                    # weaken this — it is attached here by the spawner, not by the caller.
+                    current_input = DELEGATED_TASK_INTEGRITY_CONTRACT + "\n---\n\n# Your task\n\n" + instructions
+                    has_requests = True
+                    while has_requests:
+                        has_requests = False
+                        user_input_requests = []
 
-                return f"## Result for {task_name}\n{final_text}\n---"
+                        try:
+                            stream = sub_agent.run(current_input, stream=True)
+                            async for update in stream:
+                                if subagent_callback:
+                                    await subagent_callback(update, is_subagent=True, agent_name=f"SubAgent_{task_name}")
+                                for c in update.contents:
+                                    if c.type == "text" and c.text:
+                                        final_text += c.text
+
+                                if getattr(update, "user_input_requests", None):
+                                    user_input_requests.extend(update.user_input_requests)
+                        except QuotaAbortException as e:
+                            from tools.fs import get_workspace_files
+                            try:
+                                _files = get_workspace_files()
+                            except Exception:
+                                _files = []
+                            _salvage = f"## Partial result for {task_name}\n"
+                            _salvage += f"(Task hit a quota limit and was stopped before returning a summary: {str(e)})\n\n"
+                            _child = child_results.get() or []
+                            if _child:
+                                _salvage += (
+                                    "### Completed sub-task results received before stopping\n"
+                                    "(These are verified findings already returned by sub-agents. "
+                                    "Use them directly. Do NOT re-research this material.)\n"
+                                )
+                                _salvage += "\n\n".join(_child) + "\n\n"
+                            if final_text.strip():
+                                _salvage += f"### Findings gathered before stopping:\n{final_text}\n\n"
+                            if _files:
+                                _salvage += "### Files already fetched to the workspace — delegate an Analyzer to read these for content:\n"
+                                _salvage += "\n".join(f"- {f}" for f in _files) + "\n"
+                            _salvage += "---"
+                            return _salvage
+
+                        if user_input_requests:
+                            has_requests = True
+                            responses = []
+                            if subagent_callback:
+                                responses = await subagent_callback(None, is_subagent=True, agent_name=f"SubAgent_{task_name}", approval_requests=user_input_requests)
+
+                            new_inputs = [current_input] if isinstance(current_input, str) else list(current_input)
+                            if responses:
+                                new_inputs.extend(responses)
+                            current_input = new_inputs
+
+                    if subagent_callback:
+                        await subagent_callback(None, is_subagent=True, agent_name=f"SubAgent_{task_name}", is_done=True)
+
+                    return f"## Result for {task_name}\n{final_text}\n---"
             finally:
                 if quota_token is not None:
                     tool_quotas_ctx.reset(quota_token)
-                available_sub_agents_ctx.reset(children_token)
+                if children_token is not None:
+                    available_sub_agents_ctx.reset(children_token)
+                child_results.reset(child_results_token)
                 holds_token.reset(token_setter)
                 delegation_depth_ctx.reset(depth_token)
 
@@ -284,8 +313,12 @@ def create_local_agent(builder, subagent_callback=None, session_data=None):
                 final_output.append(f"## Error\nTask failed with exception: {res}\n---")
             else:
                 final_output.append(str(res))
-                
-        return "\n\n".join(final_output)
+
+        _joined = "\n\n".join(final_output)
+        _bucket = child_results.get()
+        if _bucket is not None:
+            _bucket.append(_joined)
+        return _joined
 
     # -------------------------------------------------------------
     # [!CAUTION] RULES FOR LLM CODING ASSISTANTS EDITING THIS:
@@ -309,7 +342,7 @@ def create_local_agent(builder, subagent_callback=None, session_data=None):
             date=current_date,
             workspace_dir=workspace_dir,
             delegation_instructions=SUBAGENT_DELEGATION_INSTRUCTIONS.format(
-                max_concurrency=config.cfg.get("settings", {}).get("concurrency", {}).get("max_concurrent_tasks", 1)
+                max_concurrency=router.current_concurrency()
             ),
             **_get_quota_format_vars()
         ),
