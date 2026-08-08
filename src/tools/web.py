@@ -305,7 +305,7 @@ async def fetch_url_to_workspace(url: str, filename: str, convert_to_md: bool = 
                 "Sorry, we can't find the page you are looking for",
                 "We had to rate limit your IP", "Too Many Requests",
             )
-            if any(m in data for m in _block_markers):
+            if any(m.lower() in data.lower() for m in _block_markers):
                 return (f"BLOCKED: {url} returned a bot-challenge, access-denied, or error page instead of "
                         f"content. Nothing was saved. Do NOT retry this URL or this website — find the same "
                         f"information from a different source.")
