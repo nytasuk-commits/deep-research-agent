@@ -355,6 +355,31 @@ class EndpointRouter:
         )
         try:
             yield ep.client
+        except BaseException as exc:
+            # Attribute the failure to the endpoint that served it. The session log
+            # records the exception text but not the URL, so a 500 could not
+            # previously be traced to a machine. Log and re-raise: orchestrator.py
+            # relies on the exception propagating to asyncio.gather.
+            status = None
+            body = None
+            for attr in ("status_code", "code"):
+                status = getattr(exc, attr, None) or status
+            resp = getattr(exc, "response", None)
+            if resp is not None:
+                status = getattr(resp, "status_code", None) or status
+                try:
+                    body = resp.text
+                except Exception:
+                    body = None
+            if body is None:
+                body = str(exc)
+            body = " ".join(str(body).split())[:400]
+            self._logger.error(
+                f"TASK FAILED {ep.url} task='{task_name or '<unnamed>'}' "
+                f"exc={type(exc).__name__} status={status} "
+                f"inflight={ep.inflight}/{self._cap} body={body}"
+            )
+            raise
         finally:
             ep.inflight -= 1
             total_after = sum(self._endpoints[u].inflight for u in self._snapshot_urls)
