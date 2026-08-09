@@ -1,6 +1,6 @@
 # web_search stalls with no return, hanging the run
 
-**Status:** Open
+**Status:** Closed — fixed and unit-tested 2026-08-08
 **Severity:** High — hangs an otherwise healthy run
 **Root cause:** CONFIRMED — global `_backoff_lock` held across the retry sleep
 in `src/tools/web.py` (lines 492–493)
@@ -108,3 +108,18 @@ shared lock. Two candidate shapes, not yet chosen:
 - `backlog/fetch-ceiling-timeout-frequency.md` — fetch timeout not a hard ceiling
 - Stall protection generally: the stream inactivity ceilings were reverted and
   must not be reintroduced via manual stream iteration
+
+## Resolution (2026-08-08)
+
+Fixed on branch `bug-triage`. `_backoff_lock` now guards only a shared `_next_allowed_search` deadline; the sleep happens outside the lock:
+
+- The lock is acquired just long enough to read the current deadline, extend it by the wait, and store it back.
+- `delay` is then computed against the deadline and awaited with the lock released.
+
+Concurrently-failing agents therefore observe one common backoff window and resume together, rather than each sleeping in turn while holding the lock. The additive queueing is gone, and no agent holds the lock — or blocks another's progress — while waiting. Each still holds its own semaphore permit and router slot during its own wait, but that is bounded by the shared window rather than by the number of other failing agents.
+
+**Unit-tested.** `tests/test_search_backoff.py` asserts `asyncio.sleep` is never called while `_backoff_lock` is held. It was verified as a real guard rather than a vacuous one: moving the sleep back inside the lock makes the test fail, and the test also asserts the backoff branch was actually reached, so it cannot pass silently if the search returns early. Suite is now 11 tests.
+
+**Not reproduced live, and deliberately so.** The fix engages only when the provider returns genuine errors to concurrent agents, which cannot be forced on demand. Note also that `3c0a0b3` had already removed the specific trigger from `session_fd50dfab` — an empty result set was being treated as a provider failure, costing three attempts and 90s of serialised backoff per empty query. Empty results now return early as a valid zero-hit result. So the observed stall was already unreachable by that route; this change fixes the underlying defect, which rate-limiting or a provider outage could still have reached.
+
+**Secondary defects split out.** The two module-level-state defects recorded above are NOT fixed and are tracked in `backlog/search-module-level-state.md`. Defect 1 (shared failure counter) was independently confirmed reachable while writing the unit test, where three successive failing searches tripped `SEARCH SERVICE UNAVAILABLE` across search boundaries.
