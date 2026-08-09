@@ -44,6 +44,11 @@ _ddgs_client = None
 _consecutive_search_failures = 0
 _backoff_lock = asyncio.Lock()
 
+# Timestamp (event-loop clock) before which no agent should issue a new search.
+# Guarded by _backoff_lock, which must be held only while reading/writing this
+# value — never across the sleep itself.
+_next_allowed_search = 0.0
+
 
 _MIN_CONTENT_CHARS = 200
 
@@ -478,7 +483,7 @@ async def web_search(
 
         return f"🔍 Found {len(result_texts)} result(s) for '{query}':\n\n{chr(10).join(result_texts)}"
         
-    global _consecutive_search_failures
+    global _consecutive_search_failures, _next_allowed_search
     max_attempts = 3
     for attempt in range(max_attempts):
         try:
@@ -524,7 +529,20 @@ async def web_search(
                         "any findings you already have.")
             if attempt < max_attempts - 1:
                 wait = 30 * (2 ** attempt)   # 30s, then 60s
+                # Shared backoff WINDOW, not a shared queue. The lock is held only
+                # long enough to extend a common "next allowed search" deadline;
+                # the sleep happens outside it. Concurrently-failing agents then
+                # wait until the same wall-clock moment and resume together,
+                # instead of each sleeping in turn while holding the lock — which
+                # made the delays additive across agents and drained the pipeline
+                # into the lock queue with both endpoints idle (session_fd50dfab).
+                loop = asyncio.get_running_loop()
                 async with _backoff_lock:
-                    await asyncio.sleep(wait)
+                    now = loop.time()
+                    deadline = max(_next_allowed_search, now) + wait
+                    _next_allowed_search = deadline
+                delay = deadline - loop.time()
+                if delay > 0:
+                    await asyncio.sleep(delay)
             else:
                 return f"Search failed: {str(e)}"
