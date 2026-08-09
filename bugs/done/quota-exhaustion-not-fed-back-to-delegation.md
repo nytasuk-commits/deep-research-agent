@@ -1,6 +1,6 @@
 # Quota exhaustion not fed back to delegation; analysis delegated for unsaved source
 
-**Status:** Open
+**Status:** Closed — fix direction 1 built and validated 2026-08-10
 **Found:** 2026-07-27, session `42140aa1-398b-42bc-b975-f059214e4d0c` (branch `review-gate-fixes`)
 **Severity:** Medium-High — analysis tasks are delegated for source files that were never saved, producing "file not found" and silent loss of a named model from the report
 
@@ -48,3 +48,22 @@ Re-run the standard 7-model query. A pass = no analysis task is delegated for a 
 - `bugs/orchestrator-collapses-named-entities-into-dimensional-todos.md` (upstream cause of the under-resourcing)
 - `delegate_tasks` tool implementation (candidate location for fix direction 1)
 - Strengthened quota-exhaustion message (existing work; relevant to fix direction 3)
+
+## Resolution (2026-08-10)
+
+Fix direction 1 (delegate-time file-existence guard) is built, on branch `bug-triage`. Directions 2 and 3 remain unbuilt — see below for why direction 1 was chosen over them.
+
+**What was added.** A `_resolve_source_files` helper in `src/engine/orchestrator.py`, called inside the `delegate_tasks` task loop before each coroutine is created. It extracts every `.md` filename named in the task instructions and checks them against `get_workspace_files()`. A named file that is absent has two possible causes, and conflating them would be a new bug:
+
+- **The delegating agent garbled a filename that IS present.** Repaired in place: a case-only difference, or a single `difflib` match above a 0.85 cutoff, is substituted into the instruction and the task runs normally. Requiring exactly one candidate above a strict cutoff means an ambiguous guess is never silently applied. This matters because `b97a959` and the "Do NOT invent, shorten, or rename it" wording in the fetch result exist precisely because agents were mangling filenames — refusing those would throw away a source that is sitting in the workspace.
+- **The fetch never saved the file.** The task is not spawned. If every task in the batch is skipped, `delegate_tasks` returns a refusal naming the missing files and instructing the caller to re-fetch or mark the item unretrievable, with no invented figures. If only some are skipped, a "Tasks not run" section is appended to `final_output` before the join, so a partial skip still reaches the parent rather than disappearing.
+
+**Validated on session 54d461f3 (2026-08-10).** 45 tool calls, 4 delegations, 4 fetches all saved. Two research delegations named no file (helper no-ops), three named `beelink_gtr9_pro_official.md`, `minisforum_ms_a2_official_specs.md` and `final_report.md`, all present. Every task spawned; no refusal or skip anywhere in the log. Delegated filenames matched the `SAVED_FILENAME` confirmations exactly, including the quoted form `'beelink_gtr9_pro_official.md'`. That confirms no false refusals on the normal path.
+
+**Not yet observed firing.** The guard's positive case needs a run in which a fetch genuinely fails, which cannot be forced on demand. The negative case — that it does not block healthy delegations — is confirmed.
+
+**Near-miss worth recording.** The helper was first inserted between the `@tool` / `@with_quota` decorators and `async def delegate_tasks`, so both decorators bound to the helper instead: the guard was registered as the LLM-callable tool named "delegate_tasks", and real delegation lost its quota wrapper. `ast.parse` succeeded and the full test suite passed in that broken state, because no test exercises the delegation path. Caught by inspection and fixed by moving the helper above the decorators. Any future insertion near a decorated function should be checked with an AST walk of `decorator_list`, not a parse and a green suite.
+
+**Why not directions 2 and 3.** Direction 3 (feedback path / stop-signal enforcement) is not sufficient on its own, and this bug's own evidence is why: the quota-stop message was present in the delegating context one call earlier and the agent delegated anyway. Enforcing it would mean the run loop refusing tool calls after a quota-stop, which is a larger change in the abort-sensitive region. Direction 2 (Orchestrator consults remaining budget before delegating) still rests on the unconfirmed premise that remaining quota is readable by the agent; that read affordance has not been verified to exist. Direction 1 needed no model judgement and no new affordance, which is why it was built first. Either of the others would still add value on top.
+
+**Side-note from the Evidence section, now resolved.** The `list_workspace_files` call that returned "Requested function not found" (events 1231/1232) was the Analyzer reaching for a tool it did not have. `8b6ce76` subsequently granted that tool, so that specific error should not recur.
