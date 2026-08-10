@@ -1,6 +1,6 @@
 # Long anti-bot / interstitial pages pass both length and block-marker filters
 
-**Status:** Done (specific case) — general case deferred
+**Status:** Open — general case confirmed by 2026-08-08 audit; marker-catchable subset now fixed
 **Type:** Bug
 **Source:** Observed 2026-07-20 — amazon_gtr9_pro_us.md (amazon.com) saved as a source containing only anti-bot/interstitial chrome with no product data.
 
@@ -22,7 +22,23 @@ The specific Amazon interstitial was fixed by adding its header phrase "Click th
 
 This marker fix only catches this known interstitial. A future bot-wall with unrecognised text would still pass. The general "detect content-free pages by low substantive-prose ratio" approach remains a possible enhancement if markerless bot-walls start appearing — but it carries false-positive risk on genuinely terse real listings (e.g. the 244-char eBay / 354-char Amazon listings that are real content), so it's deferred unless the need proves real.
 
+### Update 2026-08-08: general case confirmed, and two undocumented gaps found
+
+An audit of 34 sub-1KB fetched sources (read in full, not sampled) found 31 junk, in eight distinct classes. The deferred "future bot-wall with unrecognised text" is not hypothetical — it was already happening at scale.
+
+Two mechanisms were missed by this file's original analysis:
+
+1. **The marker check was case-sensitive.** 19 of the 31 junk files were rejection pages whose text differed from an existing marker only by capitalisation: Akamai/EdgeSuite emits "# Access Denied" (capital D) against a marker reading "Access denied"; TechPowerUp emits "# 403 - Access Denied". Fixed by matching case-insensitively — no new strings required for those 19.
+2. **The marker check only runs on pages under 20000 chars.** This ceiling is undocumented in this file and narrows the "long junk" case further than the title implies: a genuinely long bot wall never reaches the marker check at all. Not exercised by any file in this audit (all were under 1KB), so it remains untested rather than confirmed.
+
+A further 10 files were fixed by adding eight markers for soft-404s served with HTTP 200 (GitHub Pages ×2 templates, LiteSpeed, RePEc/IDEAS, Effloow), a TechPowerUp CAPTCHA wall, an idealo error page and an Oracle outage page. A bare "404" marker was deliberately rejected as too broad. "Something has gone wrong" was narrowed to "Sorry! Something has gone wrong" after it matched legitimate troubleshooting prose in testing — false positives are costly here because a BLOCKED result instructs the agent never to retry the URL.
+
+The residual 6 files have no matchable text and are split out into `backlog/content-free-page-detection.md`. The low-substantive-prose-ratio idea this file proposed is still the right direction for them, and the audit supplies the false-positive counterexample it needs to be tested against: `g4_meromero_26b_a4b_gguf_model.md` is genuine content at 683 bytes with almost no prose, only label/value pairs.
+
+Separately observed, not junk-related: the same Tesco store URL was fetched four times across four runs and the same LoopNet and NVIDIA NIM URLs twice each, every time returning the same rejection page. Dedup is per-run, so a known-blocked URL is re-paid for on every subsequent run — see `backlog/dedup-remember-blocked-urls.md`.
+
 ## Related
 - src/tools/web.py (_block_markers, junk-length gate)
 - Searcher prompt source-selection guidance in src/prompts.py
 - bugs/junk-fetches-saved-as-sources.md (sibling — short-junk case)
+- `backlog/content-free-page-detection.md` (residual markerless cases split out 2026-08-08)

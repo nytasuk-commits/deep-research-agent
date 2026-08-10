@@ -12,7 +12,7 @@ import time
 import logging
 import contextlib
 import pathlib
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Callable
 
 import httpx
 
@@ -223,7 +223,7 @@ class EndpointRouter:
 
     async def snapshot_and_prime(
         self,
-        notify: Optional[asyncio.Callable[[str], None]] = None
+        notify: Optional[Callable[[str], None]] = None
     ) -> Tuple[List[str], int]:
         """
         Take a health snapshot of all endpoints, prime unprimed candidates,

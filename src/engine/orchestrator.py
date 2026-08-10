@@ -266,6 +266,42 @@ async def create_local_agent(builder, subagent_callback=None, session_data=None,
     # and starves the token pool), `delegate_tasks` utilizes contextvars
     # to mathematically surrender its token while waiting, allowing children to safely execute.
     # -------------------------------------------------------------
+    def _resolve_source_files(instr: str) -> tuple[str, list[str]]:
+        """Check .md filenames named in an instruction against the workspace.
+
+        Returns (possibly-rewritten instruction, genuinely-missing filenames). A
+        named file can be absent for two different reasons that must not be
+        conflated: the fetch never saved it, or the delegating agent garbled a
+        filename that IS present. Only the first is a real miss; the second is
+        repaired here, since refusing it would discard a source that exists.
+        """
+        import difflib
+        try:
+            from tools.fs import get_workspace_files
+            available = get_workspace_files() or []
+        except Exception:
+            return instr, []
+        if not available:
+            return instr, []
+        named = set(re.findall(r"[\w.\-]+\.md", instr))
+        if not named:
+            return instr, []
+        lower_map = {a.lower(): a for a in available}
+        missing = []
+        for fname in named:
+            if fname in available:
+                continue
+            exact_ci = lower_map.get(fname.lower())
+            if exact_ci:
+                instr = instr.replace(fname, exact_ci)
+                continue
+            close = difflib.get_close_matches(fname, available, n=2, cutoff=0.85)
+            if len(close) == 1:
+                instr = instr.replace(fname, close[0])
+                continue
+            missing.append(fname)
+        return instr, missing
+
     @tool(name="delegate_tasks", description="Delegate multiple independent tasks to specialized sub-agents to be executed concurrently. Pass a list of dictionaries, each with 'task_name', 'instructions', and optionally 'agent_id'.")
     @with_quota
     async def delegate_tasks(tasks: list[dict]) -> str:
@@ -290,11 +326,22 @@ async def create_local_agent(builder, subagent_callback=None, session_data=None,
             task_shares.append(share)
 
         coroutines = []
+        skipped_tasks = []
         for idx, t in enumerate(tasks):
             name = t.get("task_name", "Unknown_Task")
             instr = t.get("instructions", "")
             aid = t.get("agent_id", None)
             web_calls_budget = task_shares[idx]
+            # Do not spawn an analysis task for a source absent from the workspace.
+            # A quota-rejected, blocked or timed-out fetch leaves no file, so the
+            # Analyzer can only return "file not found": the delegation is wasted
+            # and the entity is silently dropped from the report. Garbled-but-
+            # present filenames are repaired, so only genuinely absent sources are
+            # refused.
+            instr, missing = _resolve_source_files(instr)
+            if missing:
+                skipped_tasks.append((name, missing))
+                continue
             coroutines.append(_run_single_task(name, instr, aid, web_calls_budget))
             
         was_holding = holds_token.get()
@@ -313,6 +360,17 @@ async def create_local_agent(builder, subagent_callback=None, session_data=None,
                 final_output.append(f"## Error\nTask failed with exception: {res}\n---")
             else:
                 final_output.append(str(res))
+
+        if skipped_tasks:
+            _skip_lines = "\n".join(
+                f"- {n}: missing source file(s) {', '.join(m)}" for n, m in skipped_tasks
+            )
+            final_output.append(
+                "## Tasks not run - source files absent from workspace\n"
+                f"{_skip_lines}\n"
+                "No analysis exists for these items. Record them as unretrievable "
+                "rather than inferring figures, or re-fetch if budget remains.\n---"
+            )
 
         _joined = "\n\n".join(final_output)
         _bucket = child_results.get()

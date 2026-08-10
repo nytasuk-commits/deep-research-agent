@@ -1,6 +1,6 @@
 # Reviewer overrides fetched sources with its own world knowledge
 
-**Status:** Open
+**Status:** Closed (fixed by 042e946, confirmed 2026-08-08)
 **Severity:** High — a false violation degraded a correct report
 **First observed:** session_7c1bcadc (2026-08-03), on main at 5265201
 **Introduced by:** `8b6ce76` (Reviewer given `list_workspace_files`)
@@ -70,6 +70,22 @@ Caveat from `session_5091cd9a`: adding a large prose block to the Reviewer's Rol
 section degraded its output format and it ignored the added guidance entirely.
 Any fix here should be as small as possible, and preferably placed in the existing
 numbered checklist rather than as new prose in the Role section.
+
+## Resolution (2026-08-08)
+
+Fixed by `042e946` ("Reviewer rule 8: a sourced claim is not invented"), merged to main in PR #11 at `084d648` — i.e. after this bug was observed on main at `5265201`.
+
+The committed rule is the candidate fix from this file, implemented as specified and placed in the numbered checklist rather than as Role-section prose, honouring the `session_5091cd9a` caveat:
+
+> **Source precedence — a sourced claim is NOT invented**: If a claim can be traced to a fetched source file in the workspace, you MUST NOT flag it as invented, fictional, or implausible, however unfamiliar it looks to you. Your own knowledge has a cutoff and today's date is later than it; names, titles, products and events that genuinely exist now will look made up to you. The fetched source is the authority, not your recollection. You may flag that a claim has NO source, or that its source is low-trust — you may NOT flag a sourced claim as fabricated, and you may NEVER claim that a fetched source file itself contains invented content.
+
+It addresses both halves of the failure: the general precedence problem, and the specific knowledge-cutoff reasoning this file identified as root cause. The final clause also closes the escalation seen here, where the Reviewer moved from doubting a claim to asserting the source file itself contained fiction.
+
+Verified present in `src/prompts.py` as Reviewer rule 8 on 2026-08-08 (branch bug-triage), by full read of the file rather than a grep.
+
+**Live confirmation:** session `c50a227a` (2026-08-08) — the Reviewer returned five substantive violations against a report whose figures were all traceable to fetched sources, and none was a fabrication or implausibility claim against a sourced value. Its objections were about missing date markers and unsourced derived figures, which rule 8 explicitly still permits. The Orchestrator applied the fixes by editing report text only, so no correct sourced data was removed — the specific harm recorded in this bug did not recur.
+
+One item from the original report remains true and is NOT resolved by this fix: the Reviewer's output format still does not reliably match the required numbered list. That is a formatting issue, not a correctness one, and is out of scope here.
 
 ## Related
 

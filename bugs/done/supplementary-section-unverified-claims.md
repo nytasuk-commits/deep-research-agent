@@ -1,6 +1,6 @@
 # Supplementary/optional report sections carry confident unverified claims
 
-**Status:** Open
+**Status:** Closed — retest passed on session 8313dc8f (2026-08-08)
 **Found:** 2026-07-26, session `ecf57d30-5d23-4f71-9964-abc2b6b5470f`
 **Severity:** Medium-High (wrong facts indistinguishable from sound ones in a shipped report)
 
@@ -46,3 +46,21 @@ Produce a definitive guide to the largest and best local LLMs that can realistic
 - Session: `ecf57d30-5d23-4f71-9964-abc2b6b5470f`
 - Verified via web search 2026-07-26: DeepSeek V4 real/accurate; PrismML Bonsai 27B real; Mistral "Large 2026/123B" wrong (real: Large 3 / 675B / Dec 2025); "Llama 4 8B/13B/27B Aug 2026" wrong (no such release; Meta 2026 = Muse Spark, proprietary)
 - The section cited one backend-benchmark source for the whole block; per-entry model claims were uncited
+
+## Retest result (2026-08-08) — PASS
+
+The retest query above was re-run as session `8313dc8f` (8 entities, 746 tool calls, 45878-char report). The discovery section was read in full from the final report. It passes on every criterion this file set.
+
+**Per-entry sourcing is now present.** All six entries in "Newer Models Released in Last 90 Days" carry their own attribution — five cite PromptQuorum, one cites the LLM Gateway Timeline — addressing the original defect, where one backend-benchmark source was cited for the whole block while the per-model claims were uncited.
+
+**Inferred figures are visibly marked.** Every performance estimate reads, e.g., `**Estimated Performance:** ~50 tok/s on Vulkan (based on similar MoE models) - *Unverified*`. That satisfies the requirement that no claim be rendered at higher confidence than its weakest supporting source justifies, applied uniformly rather than to a named section.
+
+**Gaps are reported as gaps.** Kimi K2.7 Code lists `**Parameters:** Not specified` rather than inventing a figure, and the runtime section states that no direct head-to-head benchmarks were found for this hardware instead of filling the space. That is the "nothing found meeting the bar is a valid answer" behaviour this file asked for.
+
+Nothing in the report matches the original failure pattern — `"Mistral Large 2026, 123B parameters"` and `"Llama 4 8B/13B/27B, released August 2026"` were stated with no sourcing and no unverified marker. A reader can now tell sourced entries from inferred ones without external fact-checking, which was the stated pass condition.
+
+Credited to `4f03598` (forbid inventing entries in discovery sections at synthesis; Reviewer rule 7 flags unsourced discovery entries), which postdates this bug and implements the second and third bullets of the fix direction above.
+
+**Caveat — what this does NOT establish.** The entries are *sourced*, not *verified*. The dominant source is PromptQuorum, an aggregator falling under the existing low-trust source tier (`7b19125`). Whether Qwen3.6 27B, Gemma 4 26B-A4B or Laguna XS 2.1 genuinely exist as described was not checked, and is a separate question from the one this bug raised. This bug was about sourcing state being invisible; that is fixed.
+
+Also noted: this is the same session in which the Reviewer died while delivering its verdict (`bugs/reviewer-dies-delivering-verdict-on-long-report.md`), and "unsourced entries in the discovery section" was among the findings lost. The discovery section passes anyway, which indicates the synthesis-stage guidance in `4f03598` is doing the work rather than the review stage catching it afterwards — a stronger result, since it does not depend on the Reviewer surviving.
