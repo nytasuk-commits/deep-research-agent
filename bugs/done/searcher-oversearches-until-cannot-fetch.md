@@ -1,6 +1,6 @@
 # Searcher over-searches until it cannot afford to fetch what it found
 
-**Status:** Open
+**Status:** Closed - mechanical guard built (a992607), retest passed on session 8313dc8f
 **Found:** 2026-07-27, session `f365b0da-9707-4142-8b3e-02196d4e7e8e` (branch `todo-entity-enforcement`)
 **Severity:** High — a mandatory named model (Qwen3-Next-80B) received no saved source and appears in the report only as "research incomplete due to quota exhaustion", despite the correct source having been found
 
@@ -50,3 +50,19 @@ Re-run the standard 7-model query. A pass = every named model that has a fetchab
 - Backlog item 1 (funnel/spending) and item 2 (rollover)
 - `bugs/quota-exhaustion-not-fed-back-to-delegation.md` (sibling: also a quota-exhaustion consequence, different mechanism)
 - `bugs/orchestrator-collapses-named-entities-into-dimensional-todos.md` (fixed; this bug is the next link in the same coverage chain)
+
+## Resolution (2026-08-10)
+
+Fixed by the mechanical guard route this file identified as the more reliable option, and the retest passes on the exact model named.
+
+**What was built.** Commit `a992607` added a search-to-fetch ratio guard in `src/tools/web.py` (guard at the search entry point, counter reset in the fetch path). A task may run at most `floor(task_quota / 6)` searches since its last fetch ATTEMPT; beyond that, `web_search` returns SEARCH BLOCKED naming the count and the ceiling, and instructing the agent to fetch what it already has. The divisor reflects a research unit of roughly one search plus up to five fetches. It was committed directly after `8d47247`, which is this bug being logged.
+
+**Deadlock-free by design,** which the fix direction above specifically warned about. The counter resets on any fetch *attempt*, success or failure, so a task whose fetches are all rejected or blocked is never trapped without a way forward. `max(1, ...)` guarantees at least one search is always permitted regardless of how small the task quota is. The whole block is wrapped in try/except so a fault in the guard cannot break search, and the pre-existing capacity/reserve check still owns the low-budget case, so this guard only fires while fetch budget remains.
+
+**Retest passed - session 8313dc8f (2026-08-10), the standard wide query.** Qwen3-Next-80B, which in `f365b0da` ended with no saved source and a section reading "Research incomplete due to quota exhaustion", ended this run with 18 saved sources. They include the GGUF cards that are the exact class of target previously found-but-never-fetched (`bartowski_qwen3_next_80b_gguf_instruct`, `bartowski_qwen3_next_80b_gguf_thinking`), plus the HF model cards, the llama.cpp quantisation docs, LM Studio and Ollama pages, and the arXiv technical report. Its report section carries real data: IQ4_XS at ~62 GB VRAM, a recommended quantisation, and a dated benchmark table. The phrase "research incomplete" and any quota-exhaustion language are absent from the report entirely.
+
+Run-wide the ratio inverted: 114 fetches to 57 searches, against ~20 searches producing zero fetches for a single model in the failing run.
+
+**Limits of this evidence.** The session log renders sub-agent calls flat, so search/fetch interleaving cannot be attributed to individual tasks - the longest consecutive-search run in the log is 8, which is the eight per-model tasks launching at once rather than one task over-searching. Per-task attribution would need the tree-grouped logging noted elsewhere as a separate feature. What is directly evidenced is the outcome the retest asks for: the previously starved model ends with saved sources and a populated section.
+
+**Residual, not blocking closure.** The guard bounds searches per fetch attempt, not total searches across a task. A task alternating one fetch with `ceiling` searches could still spend heavily on searching - but never while holding unfetched results, which is the failure this bug describes. Budget efficiency in the wider sense remains backlog item 1 (funnel) and item 2 (rollover).
