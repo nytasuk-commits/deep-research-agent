@@ -1,0 +1,31 @@
+# Todo — New Tracking Items from 2026-09-07 Review
+
+Derived from `00_full_report.md` (75 code findings + 32 cross-ref items). Ten new files to add to `bugs/` and `backlog/`, ranked by impact on research quality first, then performance, then hygiene. Each was checked against every open file in both folders — none duplicates existing tracking.
+
+## Bugs (5)
+
+- [ ] **1. `bugs/reviewer-output-format-non-compliance.md`** — Reviewer has "never been compliant across seven observed runs" with its required output contract (numbered concerns list or `REVIEW PASSED`). Phase 3's value is an independent, machine-parseable verdict; if the format never lands, the review gate is silently degraded every run. Evidence already in two docs (`reviewer-overrides-fetched-sources` residual note, `general-vs-specific-task-decomposition`) but no dedicated file.
+- [ ] **2. `bugs/delegate-tasks-accepts-string-not-list.md`** — A live `delegate_tasks` call received `tasks` as a 1052-char string instead of a list (flagged in `web-call-quota-exhausted`, never tracked). No input coercion/validation, so the tool-call malformation family that has repeatedly bitten this stack (Qwen XML template, LM Studio) silently degrades task decomposition instead of failing loudly.
+- [ ] **3. `bugs/tui-module-state-leaks-across-runs.md`** — Four related defects: module-level mutable globals (`_session_events`, `_current_call_by_source`, … at tui.py:26-29), `session_dir_ctx` token never reset (tui.py:900), and `review_phase_ctx.set(True)` with no reset in both TUI and headless paths (tui.py:1134/:1484). In one process (`/new`), run N+1 inherits run N's state — wrong review enforcement, cross-session bleed. Distinct from the already-tracked `search-module-level-state` (web.py only).
+- [ ] **4. `bugs/quota-abort-exception-inherits-baseexception.md`** — core.py:25 makes `QuotaAbortException` a `BaseException`, bypassing every `except Exception` handler and forcing string-name checks (`type(e).__name__ == …`) plus broad `except BaseException` at call sites. Any future call site catching plain `Exception` will silently swallow quota aborts. Cheap to fix now, expensive after more call sites accrete.
+- [ ] **5. `bugs/web-search-skips-quota-wrapper.md`** — web.py:398/:417: `web_search` manually calls `check_quota`, skipping `_check_repeat` loop detection and the CRITICAL error wrapper every other tool gets via `@with_quota`. The one tool most prone to runaway loops is the one without loop protection.
+
+## Backlog (5)
+
+- [ ] **6. `backlog/session-persistence-quadratic-io.md`** — The report's highest-impact code item: `_write_log()` rewrites the *entire* session JSON on every stream chunk → O(session²) disk I/O over a long run. Bundle in the four `open()` calls without `encoding="utf-8"` (tui.py:603/:1198/:1327/:1548), which can corrupt unicode session JSON under Windows cp1252 — sessions feed `/resume` and the eval harness.
+- [ ] **7. `backlog/listing-tools-read-full-corpus.md`** — `list_workspace_files` (fs.py:163-171) reads every file's full content just to compute line/char counts, and `_show_file_picker` does the same for byte counts on `/files`. A quota-charged tool agents call repeatedly pays a full-corpus read per call. Complements but is distinct from `whole-file-read-throughput` (Analyzer *strategy*, not this implementation cost).
+- [ ] **8. `backlog/review-done-detection-fragile-heuristic.md`** — Phase 3 completion detection scans all accumulated `_session_events` for the substring "Reviewer" inside delegate args (tui.py:1127) on every agent-turn completion — any mention triggers it, O(events × arg length) per turn. Pairs with item 1: a fixed Reviewer output contract gives a robust signal to detect against.
+- [ ] **9. `backlog/loop-breaker-evasion-varied-greps.md`** — The alternating-pair detector catches identical-consecutive and A-B-A-B patterns, but a live run showed the Reviewer making **38 grep calls** by varying patterns (recorded in `multi-endpoint-router`, never tracked). Design against sequences of *different* narrow greps, not just repeats.
+- [ ] **10. `backlog/tracking-doc-integrity-audit.md`** — One consolidated doc-hygiene item; all sub-items are record corrections and the tracking system's credibility is what makes items 1-9 actionable:
+    - [ ] `phase-2-checklist-driven-gap-mop-up` claims Done/validated but its code (task_records/checklist gate) is absent from src/ — a **false done record** (most serious sub-item)
+    - [ ] `quota-exhaustion-not-fed-back`:69 claims the Analyzer tool grant "should not recur," but app.py:34 does not grant it post-rollback — the error *can* recur. Carries the one code decision in this item: re-grant or amend the record
+    - [ ] Stale blocker refs keep `multi-model-agent-routing` marked blocked on a bug that's Done (`simple-query-tool-call-malform`) → unblocks a High item; also fix the same stale ref in `auto-prime-session-on-start`
+    - [ ] `CURRENT_ISSUES.md` referenced by three docs, absent from repo — restore or remove references
+    - [ ] CLAUDE.md documents `report_draft.md` (and an Orchestrator without file reading) that don't match src/ — fold in the app.py:60 / prompts.py contradiction
+    - [ ] Close out the two "resolved but unmarked" files: move `dedup-fetches` and `reapply-after-phase-rollback` to done/ (after noting af18dab's Analyzer grant is absent)
+
+## Deliberately left off
+
+- config.py import-time side effects (medium, low urgency)
+- httpx client reuse / BeautifulSoup double-parse (real but smaller than items 6/7)
+- everything already covered by the 19 confirmed-open items in `04_backlog_crossref.md`

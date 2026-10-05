@@ -1,0 +1,50 @@
+# Pass 1 — Code Quality (2026-09-07)
+
+Scope: dead code, duplication, inconsistent patterns, error handling gaps. Source files under `src/` only.
+
+## Findings
+
+- src/app.py:60 — Orchestrator tool list includes read_workspace_file, contradicting CLAUDE.md ("No web or file reading tools") and the prompts.py header comment (medium)
+- src/app.py:51 — Reviewer is granted list_workspace_files beyond its documented set (read/grep/think) (low)
+- src/config.py:6-18 — parses sys.argv for --config/-c at import time; importing the module mutates global state (medium)
+- src/config.py:140 — auto-calls load_config() on import; file read/create side effect from a plain import (medium)
+- src/config.py:90 — OPENAI_MODEL env override applies only while config is still at its default, making precedence surprising (low)
+- src/engine/orchestrator.py:307 — delegate_tasks tool closure redefined inside every create_local_agent() call (line 69); a fresh tool object per agent instead of one shared definition (low)
+- src/engine/orchestrator.py:85-89,262-268,381-385 — three near-identical [!CAUTION] boilerplate comment blocks duplicated across agent definitions (low)
+- src/engine/router.py:475-476 — _probe swallows all exceptions (`except Exception: return False`) with no logging; a programming error is indistinguishable from an endpoint being down (medium)
+- src/engine/router.py:276,449 — backoff index computation `min(fail_count - 1, len(_BACKOFF) - 1)` duplicated in _prime_if_needed and _mark_probe_failed (low)
+- src/engine/tui.py:26-29 — module-level mutable globals (_session_events, _current_call_by_source, _current_text_by_source, _current_session_id) shared across sessions; state leaks between runs in one process (medium)
+- src/engine/tui.py:50-51,56-57 — _write_log swallows all exceptions (`except Exception: pass`); session-persistence failures are invisible (low)
+- src/engine/tui.py:47 — reaches into private orchestrator_module._session across a module boundary (low)
+- src/engine/tui.py:188-189 — bare `except Exception: pass` in PromptInput.on_key hides key-handling errors (low)
+- src/engine/tui.py:251,303,338 — DOTS_FRAMES list triple-duplicated across ThinkingWidget/ProcessingWidget/ToolCallWidget (low)
+- src/engine/tui.py:690,773 — nested function apply_depth_style defined identically twice (reconstruct_ui_from_events and handle_agent_update) (low)
+- src/engine/tui.py:950-956 vs 1083-1090 — approval tool-execution logic (WORKSPACE_TOOLS lookup + parse_arguments + call) duplicated between ui_callback and the main loop; divergence risk (medium)
+- src/engine/tui.py:940-946,1072-1078 — target-widget fallback lookup (match by tool_name, not done) duplicated in both approval paths (low)
+- src/engine/tui.py:459,618,930,1060,1278,1384,1448 — `getattr(config, 'AUTO_APPROVE', False)` repeated 7 times with no single accessor (low)
+- src/engine/tui.py:603,1198,1327,1548 — open() without encoding="utf-8" while other opens specify it; on Windows the cp1252 default can corrupt session JSON containing unicode (medium)
+- src/engine/tui.py:900 — session_dir_ctx.set(...) token is never reset; the only reset (line 1513) belongs to run_cli's separate token (line 1268), so the TUI-path contextvar leaks for the rest of the process (medium)
+- src/engine/tui.py:1134,1484 — review_phase_ctx.set(True) with no saved/reset token; once set it stays True for the remainder of that context in both TUI and headless paths (medium)
+- src/engine/tui.py:1127 — review_done detection scans all _session_events for the substring "Reviewer" inside delegate_tasks argument strings; fragile heuristic, any mention triggers it (medium)
+- src/engine/tui.py:1436 — `update` referenced after the async-for loop; if the stream yields no updates this is an unbound-variable NameError escaping as BaseException (low)
+- src/engine/tui.py:1438-1442 — QuotaAbortException detected by string comparison of type name (`type(e).__name__ == ...`) instead of importing the class; forces a broad `except BaseException` (medium)
+- src/engine/tui.py:487 — auto-prime throwaway "Hello" turn on fresh sessions, a workaround for Qwen XML chat-template malformation; fragile coupling to model-specific behaviour (documented) (low)
+- src/tools/core.py:25 — QuotaAbortException inherits BaseException instead of Exception; bypasses every `except Exception` handler and forces string-name checks at call sites (medium)
+- src/tools/core.py:185-207 — with_quota's async_wrapper/sync_wrapper are near-duplicate bodies (quota check + repeat check + traceback wrapper) (low)
+- src/tools/core.py:173-175 — _check_repeat catches all exceptions and returns None (allow); loop detection silently disabled on any internal failure, no logging (low)
+- src/tools/fs.py:22 — `".." in filename` blocks any path containing ".." anywhere, including legitimate names like "a..b.md"; over-broad guard (low)
+- src/tools/fs.py:137-138,158-159,205-206,225-226 — every tool handler embeds full traceback.format_exc() in the string returned to the LLM; leaks internal paths and bloats context (low)
+- src/tools/web.py:148 — mixed `or`/`and` without parentheses (`... or url.lower().find(...) != -1 and "/" in _dom`); precedence-dependent, intent unclear (medium)
+- src/tools/web.py:259 — paywall heuristic requires the substring "false" anywhere on the page; false positives on any text containing e.g. "falsehoods" (medium)
+- src/tools/web.py:294-296 — wait_for timeout returns FETCH TIMEOUT but the fetch thread keeps running orphaned, holding resources until it finishes (tracked in backlog/search-module-level-state.md) (medium)
+- src/tools/web.py:371-374 — with session isolation off, the dedup registry is keyed by an empty run_key and persists across runs within one process; URLs fetched in a prior run are reported "ALREADY FETCHED" (medium)
+- src/tools/web.py:398,417 — web_search lacks @with_quota and calls check_quota("web_search") manually, skipping _check_repeat loop detection and the CRITICAL TOOL EXECUTION ERROR wrapper; inconsistent with every other tool (medium)
+- src/tools/web.py:484 — `chr(10).join` instead of "\n".join; obscure style (low)
+- src/utils/parsers.py:27-28 — `except Exception as e: return None` swallows all parse errors (variable unused); callers cannot distinguish "no content" from "parse failure" (low)
+- src/prompts.py:52-64 — header comment says the Orchestrator has NO read_workspace_file, but the prompt body at line 64 lists it; internal contradiction matching app.py:60 (medium)
+- src/prompts.py:246-247 — {web_search_quota}/{fetch_url_to_workspace_quota} placeholders are tied to legacy per-tool config keys while current config uses a unified web_calls pool; if those keys are absent the placeholders stay unsubstituted in the rendered prompt (medium)
+- src/prompts.py:328 — same variable {read_workspace_file_quota} repeated twice in one sentence ("maximum calls (max ... reads total)") (low)
+
+## Totals
+
+41 findings: 17 medium, 24 low. No high-severity items identified in this pass.
