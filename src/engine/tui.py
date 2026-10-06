@@ -889,6 +889,18 @@ class BasicTuiAgent(App):
 
     @work(exclusive=True)
     async def run_agent(self, query: str, show_user_message: bool = True):
+        # Wrapper whose finally guarantees review_phase_ctx is cleared at turn
+        # end however the body exits (return, exception, quota-abort break).
+        # The flag is set mid-turn when review is enforced; left set, it
+        # releases the web_calls reserve for every later run in the process
+        # (bugs/tui-module-state-leaks-across-runs.md).
+        try:
+            await self._run_agent_inner(query, show_user_message)
+        finally:
+            from tools.core import end_review_phase
+            end_review_phase()
+
+    async def _run_agent_inner(self, query: str, show_user_message: bool = True):
         self._is_agent_running = True
         
         # Session directory isolation: when enabled, ALL workspace file operations
@@ -1508,6 +1520,8 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
         sys.stdout.write(f"\n\033[91mError:\033[0m {e}\n")
     finally:
         tool_quotas_ctx.reset(token)
+        from tools.core import end_review_phase
+        end_review_phase()
         if session_token is not None:
             from tools.fs import session_dir_ctx
             session_dir_ctx.reset(session_token)

@@ -7,6 +7,14 @@ import asyncio
 tool_quotas_ctx = contextvars.ContextVar('tool_quotas', default=None)
 review_phase_ctx = contextvars.ContextVar('review_phase', default=False)
 
+def end_review_phase():
+    """Return review_phase_ctx to its default. Must be called at the end of
+    every agent turn (in a finally): check_quota releases the web_calls
+    reserve whenever the flag is set, so a flag left True after the first
+    review round inflates the budget of every later run in the process
+    (bugs/tui-module-state-leaks-across-runs.md)."""
+    review_phase_ctx.set(False)
+
 # Repeat detection threshold: consecutive identical calls beyond this count are refused
 _REPEAT_THRESHOLD = 1
 
