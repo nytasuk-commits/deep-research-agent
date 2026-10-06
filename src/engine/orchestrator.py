@@ -56,6 +56,37 @@ def _safe_format(template: str, **kwargs) -> str:
             return '{' + key + '}'
     return template.format_map(_SafeDict(**kwargs))
 
+# Regexes used to validate a Reviewer's verdict against its output contract.
+# A bullet line is a Markdown list item the verdict is not supposed to use; a
+# tool-leak match means the "verdict" is actually a malformed tool-call block.
+_REVIEWER_BULLET_RE = re.compile(r"^\s*[-*]\s", re.MULTILINE)
+_REVIEWER_TOOL_LEAK_RE = re.compile(
+    r"<function[=\s>/]|<parameter\s*=|<function_call>|</function_call>"
+)
+
+def _reviewer_verdict_issue(final_text: str):
+    """Return a human-readable reason the Reviewer's verdict violates its required
+    output contract (a numbered list, or the verbatim 'REVIEW PASSED' line), or
+    None if it conforms.
+
+    This is a flag, not a rewrite: the actual findings in final_text are passed
+    through to the caller untouched. Surfacing the non-conformance (rather than
+    silently consuming a malformed verdict) is what keeps the review gate from
+    quietly degrading run after run.
+    """
+    text = (final_text or "").strip()
+    if not text:
+        return "returned an empty verdict"
+    if text.startswith("REVIEW PASSED"):
+        return None
+    if re.match(r"^\s*1[\.)\s]", text) and not _REVIEWER_BULLET_RE.search(text):
+        return None
+    if _REVIEWER_TOOL_LEAK_RE.search(text):
+        return "appears to contain a leaked tool-call / think block instead of a clean verdict"
+    if _REVIEWER_BULLET_RE.search(text):
+        return "uses bullets instead of the required numbered list"
+    return "does not start with the required numbered list (or the verbatim REVIEW PASSED line)"
+
 def _get_default_options():
     options = {"temperature": 0.0}
     # OpenAI's official API rejects "chat_template_kwargs"
@@ -249,7 +280,17 @@ async def create_local_agent(builder, subagent_callback=None, session_data=None,
                     if subagent_callback:
                         await subagent_callback(None, is_subagent=True, agent_name=f"SubAgent_{task_name}", is_done=True)
 
-                    return f"## Result for {task_name}\n{final_text}\n---"
+                    header = f"## Result for {task_name}"
+                    if agent_id == "Reviewer":
+                        issue = _reviewer_verdict_issue(final_text)
+                        if issue:
+                            header += (
+                                "\n⚠ The Reviewer's verdict does not meet the required output contract: "
+                                f"{issue}. The findings below are passed through unchanged; if they do not "
+                                "convey a usable verdict, re-issue the review task asking for a numbered list "
+                                "or the single line 'REVIEW PASSED'."
+                            )
+                    return f"{header}\n{final_text}\n---"
             finally:
                 if quota_token is not None:
                     tool_quotas_ctx.reset(quota_token)
