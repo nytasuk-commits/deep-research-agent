@@ -1,6 +1,6 @@
 # Phase 3 review-done detection is a substring scan over all events
 
-**Status:** Open
+**Status:** Superseded as backlog — the predicted failure occurred live 2026-10-06 and is now tracked as `bugs/review-gate-skipped-after-first-turn.md` (only the first turn of a session gets reviewed). The efficiency half (O(events × arg length) per turn) remains relevant to that fix.
 **Type:** Backlog (robustness + efficiency)
 **Derived from:** `docs/reviews/2026-09-07/todo.md` item 8
 

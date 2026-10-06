@@ -1,7 +1,7 @@
 # TUI module-level state and contextvars leak across runs in one process
 
 **Status:** Defect 1 FIXED 2026-10-06 (`end_review_phase()` in core.py, called in a finally on both turn-end paths — `run_agent` wrapper in the TUI, `run_cli` finally in headless; pinned by `tests/test_review_phase_reset.py`, 6 cases incl. AST wiring guards). Defect 2 reclassified (see below). Defect 3 open. NOT yet validated on a live multi-run session.
-**Severity:** Medium-High (was) — after the first review phase, `review_phase_ctx` stayed `True` for the rest of the process, permanently releasing the `web_calls` reserve that is supposed to be held back; run N+1 via `/new` inherited it
+**Severity:** Downgraded to Low (2026-10-06, live investigation) — the leak is real state hygiene, but the claimed budget effect does not occur in the current architecture. The reserve is enforced at ALLOCATION (`orchestrator.py:351`, `limit - reserve`), which never consults `review_phase_ctx`; and per-task quota contexts explicitly strip the reserve rules (`orchestrator.py:227`, `pop("rules", None)`), so the only flag-sensitive path (`core.py:36`) applies to the top-level context, where no web calls happen in the delegation chain. Session `9f3b80f8` turn 2 confirmed: 21 web calls under a 30-limit pool produced no reserve-clause message because that message cannot fire for sub-agent calls at all.
 **Derived from:** `docs/reviews/2026-09-07/todo.md` item 3. Distinct from `backlog/search-module-level-state.md` (web.py only).
 
 ## Defects (verified 2026-10-06 against current code)
