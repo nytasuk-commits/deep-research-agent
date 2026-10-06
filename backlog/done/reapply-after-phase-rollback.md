@@ -1,5 +1,7 @@
 # Re-apply candidates after Phase 2/3 rollback (FOR REVIEW)
 
+**Closed 2026-10-06:** all clean candidates are applied except **af18dab** (Analyzer `list_workspace_files` grant) — verified absent at `app.py:34`. That open decision is tracked in `backlog/tracking-doc-integrity-audit.md`; the false "should not recur" claim it produced was corrected in `bugs/done/quota-exhaustion-not-fed-back-to-delegation.md`.
+
 Context: branch reverted to commit 959165e (pre–Phase 2/3) because the phased
 draft/corrective model was unstable. The commits below were made AFTER 959165e on
 `david-refinements` and are independent of the rolled-back phases. Review and apply individually;

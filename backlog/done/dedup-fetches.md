@@ -1,6 +1,6 @@
 # Layered fetch dedup (URL + content-hash)
 
-**Status:** Done — pending live confirmation
+**Status:** Done — moved to done/ 2026-10-06 (code confirmed present: `_dedup_lock`/`_fetched_hashes` registry at web.py:15-39, re-applied post-rollback via 8c87bcc per backlog/done/reapply-after-phase-rollback.md)
 **Type:** Backlog
 **Source:** Runtime investigation 2026-07-20; same source was fetched ~29 times in the 8-model run.
 
