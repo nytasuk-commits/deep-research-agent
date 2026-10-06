@@ -28,6 +28,21 @@ _current_call_by_source = {}
 _current_text_by_source = {}
 _current_session_id = str(uuid.uuid4())
 
+def _turn_review_done(events, turn_start_idx):
+    """True if a Reviewer delegation was logged WITHIN the current turn.
+
+    The scan is scoped to events from turn_start_idx onward. Scanning the
+    whole list (the old behaviour) let turn 1's Reviewer satisfy turn 2's
+    mandatory-review gate, so every report after the first in a process
+    shipped unreviewed (bugs/review-gate-skipped-after-first-turn.md).
+    """
+    return any(
+        ev.get("type") == "function_call"
+        and ev.get("data", {}).get("name") == "delegate_tasks"
+        and "Reviewer" in (ev.get("data", {}).get("arguments") or "")
+        for ev in events[turn_start_idx:]
+    )
+
 def _write_log():
     if not config.cfg["settings"].get("enable_session_persistence", False):
         return
@@ -894,6 +909,9 @@ class BasicTuiAgent(App):
         # The flag is set mid-turn when review is enforced; left set, it
         # releases the web_calls reserve for every later run in the process
         # (bugs/tui-module-state-leaks-across-runs.md).
+        # Snapshot where this turn starts in the accumulated event list so the
+        # review gate can scope its scan to this turn only.
+        self._turn_start_idx = len(_session_events)
         try:
             await self._run_agent_inner(query, show_user_message)
         finally:
@@ -1133,12 +1151,7 @@ class BasicTuiAgent(App):
                     report_exists = "final_report.md" in get_workspace_files()
                 except Exception:
                     report_exists = False
-                review_done = any(
-                    ev.get("type") == "function_call"
-                    and ev.get("data", {}).get("name") == "delegate_tasks"
-                    and "Reviewer" in (ev.get("data", {}).get("arguments") or "")
-                    for ev in _session_events
-                )
+                review_done = _turn_review_done(_session_events, getattr(self, "_turn_start_idx", 0))
                 if report_exists and not review_done:
                     enforced_review_check = True
                     has_requests = True

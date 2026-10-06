@@ -1,6 +1,6 @@
 # Reviewer verdict does not meet its required output format
 
-**Status:** Open — fix applied 2026-10-05 (prompt rewrite + code-side guard); first live validation 2026-10-06 passed (1/1 compliant, worked-example shape, guard correctly silent) but n=1 is not statistical validation
+**Status:** Open — fix applied 2026-10-05 (prompt rewrite + code-side guard). Post-fix cohort 2026-10-06: 4 verdicts — 2/2 compliant under normal quotas (worked-example shape, guard silent), 2 prose under fast_test where the Reviewer exhausted the reduced read quota before reading the report; the guard flagged both, its first live firings. Still short of statistical validation; fast_test verdicts are quota artifacts, see Validation.
 **Severity:** High — Phase 3's value is an independent, machine-parseable verdict; when the format never lands, the review gate is silently degraded every run
 **Derived from:** `docs/reviews/2026-09-07/todo.md` item 1
 
@@ -72,6 +72,12 @@ GPU-comparison prompt (three cards, prices + tokens/sec, declared winner). The v
 - Downstream handling also worked: the Orchestrator consumed the verdict, edited `final_report.md` in place, and every flagged figure gained a bracketed date marker.
 
 n=1 is encouraging, not conclusive. Keep the bug open until the compliant share moves over a larger post-fix cohort.
+
+### Guard fired live for the first time: 2026-10-06, session `c57d2d55`
+
+Under fast_test, both review rounds in that session produced prose verdicts — the Reviewer exhausted the reduced `read_workspace_file` quota (15) on source-file checks before reading the report, and returned a quota-explanation instead of a verdict. The guard prepended the `⚠ ... does not meet the required output contract` header on both, exactly as designed: non-conformance surfaced, findings passed through.
+
+Cohort read with this: **2/2 compliant under normal quotas; 0/2 under fast_test, both quota-induced.** The fast_test failures are an artifact of the profile (read limit 15 is too tight for the Reviewer's report+sources pass), not evidence against the prompt rewrite — but they are the guard's proof of firing. If fast_test stays in regular use, consider raising its `read_workspace_file` override or exempting the Reviewer.
 
 ### Sweep tool and corrected baseline
 
