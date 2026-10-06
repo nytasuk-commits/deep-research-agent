@@ -51,7 +51,8 @@ reviewer = SubAgentConfig(
     tools=[read_workspace_file, grep_workspace_file, list_workspace_files, think_tool]
 )
 
-# 3. Orchestrator — task management only, NO web, NO file reading
+# 3. Orchestrator — task management + report writing, NO web.
+#    read_workspace_file is granted but prompt-restricted to final_report.md during review.
 #    sub_agents=[searcher, reviewer] = delegates research to Searcher, review to Reviewer
 app = AgentBuilder(
     name=config.APP_TITLE,

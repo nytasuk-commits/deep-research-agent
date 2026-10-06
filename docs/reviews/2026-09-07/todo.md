@@ -21,7 +21,7 @@ Derived from `00_full_report.md` (75 code findings + 32 cross-ref items). Ten ne
     - [ ] `quota-exhaustion-not-fed-back`:69 claims the Analyzer tool grant "should not recur," but app.py:34 does not grant it post-rollback — the error *can* recur. Carries the one code decision in this item: re-grant or amend the record
     - [ ] Stale blocker refs keep `multi-model-agent-routing` marked blocked on a bug that's Done (`simple-query-tool-call-malform`) → unblocks a High item; also fix the same stale ref in `auto-prime-session-on-start`
     - [ ] `CURRENT_ISSUES.md` referenced by three docs, absent from repo — restore or remove references
-    - [ ] CLAUDE.md documents `report_draft.md` (and an Orchestrator without file reading) that don't match src/ — fold in the app.py:60 / prompts.py contradiction
+    - [x] CLAUDE.md documents `report_draft.md` (and an Orchestrator without file reading) that don't match src/ — fold in the app.py:60 / prompts.py contradiction — RESOLVED 2026-10-06: draft/final split removed from design; CLAUDE.md + README.md Phase 3 sections rewritten to in-place review of final_report.md; Orchestrator read_workspace_file grant (app.py:60) documented with its prompt restriction; stale app.py:54 comment corrected
     - [ ] Close out the two "resolved but unmarked" files: move `dedup-fetches` and `reapply-after-phase-rollback` to done/ (after noting af18dab's Analyzer grant is absent)
 
 ## Deliberately left off

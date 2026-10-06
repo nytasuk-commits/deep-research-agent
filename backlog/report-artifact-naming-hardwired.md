@@ -13,7 +13,7 @@
 
 1. The TUI review state machine keys off the report filename to decide when review is required and when a turn may end.
 2. The config `required_artifact` check validates that a deliverable exists under the expected name.
-3. The Orchestrator prompt instructs writing `final_report.md` exactly once, and `report_draft.md` is the separate synthesis artifact.
+3. The Orchestrator prompt instructs writing `final_report.md` exactly once. There is no separate draft artifact — the draft/final split was removed from the design (2026-10-06); review and correction happen in place on `final_report.md`.
 
 ## Why this is not a bug
 
