@@ -1594,7 +1594,21 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
         except Exception:
             pass
 
+def _ensure_utf8_streams():
+    """Redirected/piped stdout on Windows defaults to the locale codec (cp1252);
+    the config banner's warning emoji then raises UnicodeEncodeError and kills
+    a headless run before the agent starts (bugs/headless-banner-crash-nonutf8-stdout.md,
+    live crash 2026-10-07). Force UTF-8 and never let one unencodable character
+    abort a long run."""
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def cli_main(builder):
+    _ensure_utf8_streams()
     parser = argparse.ArgumentParser(description="Basic Agent TUI / CLI Scaffold")
     parser.add_argument("--config", "-c", type=str, help="Path to config.yaml", default=None)
     parser.add_argument("--prompt", "-p", type=str, help="Run non-interactively with a specific prompt (headless mode)", default=None)
