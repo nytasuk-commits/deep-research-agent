@@ -1460,11 +1460,14 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
                                 report_just_written = True
                 if getattr(update, "user_input_requests", None):
                     user_input_requests.extend(update.user_input_requests)
-            except BaseException as e:
-                if type(e).__name__ == "QuotaAbortException":
-                    sys.stdout.write(f"\n\033[91m[System] Task forcefully aborted: {str(e)}\033[0m\n")
-                    break
-                raise
+            except QuotaAbortException as e:
+                # Catch by type, not by class-name string (the class is
+                # imported above; bugs/quota-abort-exception-inherits-baseexception.md).
+                # QuotaAbortException stays a BaseException subclass on purpose:
+                # agent-framework converts any Exception from a tool into an
+                # error result for the model, which would swallow the abort.
+                sys.stdout.write(f"\n\033[91m[System] Task forcefully aborted: {str(e)}\033[0m\n")
+                break
                     
             if user_input_requests:
                 has_requests = True

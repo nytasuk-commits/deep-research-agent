@@ -15,6 +15,8 @@ Review completion is detected by scanning **all** accumulated `_session_events` 
 
 Verified 2026-10-06: `tui.py:1124-1131`. The headless path (`tui.py:1434`, `:1479`) keys off `"final_report.md" in str(result)` instead — a different fragile heuristic for the same question.
 
+**Headless variant observed live 2026-10-07, session `2f9a47a8`:** round 1's Reviewer verdict was the verbatim `REVIEW PASSED` line, but the delegate result's own wrapper (`## Result for Review final_report.md ...`) contains the substring `final_report.md`, so `"final_report.md" in str(result)` re-armed the gate for a pointless round 2. The Orchestrator then repeated the identical Reviewer delegation, tripping the `delegate_tasks` identical-call loop breaker — the turn was force-terminated mid-review. The heuristic didn't just waste a round; it manufactured a loop-breaker abort.
+
 ## Fix direction
 
 The reviewer-output-format fix (closed-loop 2026-10-06) gives a robust signal to detect against: record an explicit review-completed flag when a `delegate_tasks` call with `agent_id == "Reviewer"` returns a result (the guard in `orchestrator.py` already classifies that result), rather than substring-scanning history. Pair with `bugs/tui-module-state-leaks-across-runs.md` — the flag should be a properly reset contextvar, not another module global.

@@ -31,7 +31,19 @@ _QUOTA_ALIASES = {
 }
 
 class QuotaAbortException(BaseException):
-    """Raised when a tool is called repeatedly despite being over quota, indicating an LLM loop."""
+    """Raised when a tool is called repeatedly despite being over quota, indicating an LLM loop.
+
+    Deliberately NOT an Exception subclass (pinned by tests/test_quota_abort_exception_class.py).
+    agent-framework's _auto_invoke_function wraps every tool call with
+    `except Exception` and converts the exception into an "Error: Function failed."
+    RESULT for the model (_tools.py:1537 direct path, :1613 middleware path,
+    v1.12.1). An Exception-based abort would be swallowed there — the model
+    would see a tool error and keep looping, silently disabling the loop
+    breaker. BaseException is how the abort escapes the framework and reaches
+    the salvage catches (tui.py run loop and run_cli, orchestrator.py
+    delegation). If the framework ever stops converting Exceptions from tools,
+    revisit the base class.
+    """
     pass
 
 def check_quota(tool_name: str) -> str | None:
