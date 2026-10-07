@@ -10,6 +10,7 @@ from engine.session_log import (
     log_prompt, log_stream_content, _write_log,
     new_session, load_session, begin_turn,
     current_events, current_turn_start, current_session_id,
+    ensure_run_dir,
 )
 import asyncio
 import json
@@ -56,6 +57,23 @@ def _headless_report_written(name, arguments):
     force-terminating the turn (session 2f9a47a8, 2026-10-07).
     """
     return name == "write_workspace_file" and "final_report.md" in (arguments or "")
+
+
+def _turn_report_written(events, turn_start_idx):
+    """True if the agent itself wrote final_report.md WITHIN the current turn.
+
+    The TUI gate used to arm on "final_report.md" in get_workspace_files().
+    With one run folder per session (defect 2), turn 1's report sat in the
+    folder forever and armed the mandatory review for every later turn —
+    including follow-ups that wrote no report. Same predicate as the
+    headless gate, scoped to the turn window like _turn_review_done.
+    """
+    return any(
+        ev.get("type") == "function_call"
+        and _headless_report_written(ev.get("data", {}).get("name"),
+                                     ev.get("data", {}).get("arguments"))
+        for ev in events[turn_start_idx:]
+    )
 
 
 class _ReportWriteTracker:
@@ -842,9 +860,8 @@ class BasicTuiAgent(App):
         # for this run are transparently mapped to a timestamped subfolder (e.g. run_1748192400/).
         # Toggle via config.yaml: settings.workspace.session_isolation: true
         if config.cfg.get("settings", {}).get("workspace", {}).get("session_isolation", False):
-            import time
             from tools.fs import session_dir_ctx
-            session_token = session_dir_ctx.set(f"run_{int(time.time())}")
+            session_token = session_dir_ctx.set(ensure_run_dir())
         
         # Initialize tool quotas from config
         config_quotas = config.cfg.get("settings", {}).get("quotas", {})
@@ -1063,11 +1080,7 @@ class BasicTuiAgent(App):
                 current_input = new_inputs
 
             if not has_requests and not enforced_review_check:
-                try:
-                    from tools.fs import get_workspace_files
-                    report_exists = "final_report.md" in get_workspace_files()
-                except Exception:
-                    report_exists = False
+                report_exists = _turn_report_written(current_events(), current_turn_start())
                 review_done = _turn_review_done(current_events(), current_turn_start())
                 if report_exists and not review_done:
                     enforced_review_check = True
@@ -1203,11 +1216,9 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
             sub_quotas[k] = {"used": 0, "limit": v["limit"], "rules": v.get("rules", {})}
     token = tool_quotas_ctx.set(sub_quotas)
 
+    # Isolation is armed AFTER the --resume block: ensure_run_dir() must read
+    # the resumed state's stored run_dir, not the pre-swap module state.
     session_token = None
-    if config.cfg.get("settings", {}).get("workspace", {}).get("session_isolation", False):
-        import time
-        from tools.fs import session_dir_ctx
-        session_token = session_dir_ctx.set(f"run_{int(time.time())}")
 
     async def cli_subagent_callback(update, is_subagent=True, is_done=False, **kwargs):
         agent_name = kwargs.get("agent_name") or getattr(update, "author_name", None) or "Sub-Agent"
@@ -1279,6 +1290,10 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
         except Exception as e:
             sys.stdout.write(f"\n\033[91mError loading session '{session_id}': {e}\033[0m\n")
             return
+
+    if config.cfg.get("settings", {}).get("workspace", {}).get("session_isolation", False):
+        from tools.fs import session_dir_ctx
+        session_token = session_dir_ctx.set(ensure_run_dir())
 
     if prompt_file:
         log_prompt(f"Started headless mode using prompt file: {prompt_file}")

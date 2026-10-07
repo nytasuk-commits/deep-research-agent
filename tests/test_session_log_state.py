@@ -6,6 +6,7 @@ accumulation semantics are the pre-existing tui.py behaviour, pinned here
 so the verbatim move is provably behaviour-preserving.
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -105,3 +106,58 @@ def test_wrappers_delegate_through_the_current_pointer():
     session_log._write_log()
     assert st.events[0]["data"]["text"] == "through wrapper"
     assert st.events[1]["data"]["text"] == "streamed"
+
+
+# --- run_dir: one workspace run folder per session, not per turn
+# (bugs/tui-module-state-leaks-across-runs.md defect 2) ---
+
+
+def test_new_state_mints_run_dir():
+    st = SessionLogState()
+    assert st.run_dir is not None
+    assert st.run_dir.startswith("run_")
+    assert st.run_dir[4:].isdigit()
+
+
+def test_from_saved_reads_run_dir():
+    st = SessionLogState.from_saved({"ui_events": [], "run_dir": "run_123"}, "sid")
+    assert st.run_dir == "run_123"
+
+
+def test_from_saved_without_run_dir_is_none():
+    # Pre-fix session files have no run_dir key; resume must not silently
+    # mint a different folder — ensure_run_dir() does that lazily.
+    st = SessionLogState.from_saved({"ui_events": []}, "sid")
+    assert st.run_dir is None
+
+
+def test_ensure_run_dir_mints_lazily_when_none_and_is_stable():
+    st = SessionLogState.from_saved({"ui_events": []}, "sid")
+    d = st.ensure_run_dir()
+    assert d is not None and d.startswith("run_")
+    assert st.run_dir == d
+    assert st.ensure_run_dir() == d
+
+
+def test_ensure_run_dir_returns_the_saved_dir():
+    st = SessionLogState.from_saved({"ui_events": [], "run_dir": "run_9"}, "sid")
+    assert st.ensure_run_dir() == "run_9"
+
+
+def test_write_log_round_trips_run_dir(tmp_path, monkeypatch):
+    from engine import session_log as _sl
+    monkeypatch.setitem(_sl.config.cfg["settings"], "enable_session_persistence", True)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    st = SessionLogState()
+    st.log_prompt("x")
+    log_file = tmp_path / f".{config.APP_NAME}" / "sessions" / f"session_{st.session_id}.json"
+    data = json.loads(log_file.read_text(encoding="utf-8"))
+    assert data["run_dir"] == st.run_dir
+    restored = SessionLogState.from_saved(data, st.session_id)
+    assert restored.run_dir == st.run_dir
+
+
+def test_run_dir_wrappers_delegate_through_the_current_pointer():
+    st = new_session()
+    assert session_log.ensure_run_dir() == st.run_dir
+    assert session_log.current_run_dir() == st.run_dir

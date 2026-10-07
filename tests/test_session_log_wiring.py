@@ -60,3 +60,16 @@ def test_boundaries_call_the_swap_helpers():
     assert "load_session" in _called_names(_func(tree, "_load_session_by_id"))
     assert "load_session" in _called_names(_func(tree, "run_cli"))
     assert "begin_turn" in _called_names(_func(tree, "run_agent"))
+
+
+def test_isolation_sites_use_ensure_run_dir():
+    """Defect 2: the run folder is per session, minted by SessionLogState.
+    Neither isolation site may format run_<ts> inline again — that is what
+    scattered a multi-turn session across one folder per turn."""
+    tree = _tui_tree()
+    assert "ensure_run_dir" in _called_names(_func(tree, "_run_agent_inner"))
+    assert "ensure_run_dir" in _called_names(_func(tree, "run_cli"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            assert not node.value.startswith("run_"), (
+                f"tui.py formats a run folder inline: {node.value!r}")

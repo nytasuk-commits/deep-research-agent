@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from engine.tui import _turn_review_done
+from engine.tui import _turn_review_done, _turn_report_written
 
 TUI = Path(__file__).parent.parent / "src" / "engine" / "tui.py"
 
@@ -75,3 +75,46 @@ def test_gate_call_site_uses_scanned_scope():
     the full event list inline."""
     src = TUI.read_text(encoding="utf-8")
     assert "_turn_review_done(" in src, "gate does not use the per-turn helper"
+
+
+# --- report-written side of the TUI gate (defect 2 gate fix) ---
+#
+# The gate armed report_exists on get_workspace_files(), which is session-
+# scoped once one run folder holds the whole session: turn 1's report made
+# turn 2 (a follow-up that writes no report) arm the mandatory review. The
+# fix mirrors the headless gate: the agent's own write_workspace_file call
+# for final_report.md, scoped to the current turn.
+
+
+def _report_write_event():
+    return {"type": "function_call", "data": {
+        "name": "write_workspace_file",
+        "arguments": '{"filename":"final_report.md","content":"draft"}',
+    }}
+
+
+def test_report_written_this_turn_arms_the_gate():
+    events = [_plain_event(), _report_write_event()]
+    assert _turn_report_written(events, turn_start_idx=1) is True
+
+
+def test_report_written_in_a_previous_turn_does_not_arm_the_gate():
+    events = [_report_write_event(), _plain_event()]
+    assert _turn_report_written(events, turn_start_idx=1) is False
+
+
+def test_reads_and_other_tools_never_arm_the_gate():
+    events = [
+        {"type": "function_call", "data": {
+            "name": "read_workspace_file",
+            "arguments": '{"filename":"final_report.md"}'}},
+        {"type": "function_call", "data": {"name": "list_workspace_files", "arguments": "{}"}},
+        {"type": "text", "data": {"text": "wrote final_report.md"}},
+    ]
+    assert _turn_report_written(events, turn_start_idx=0) is False
+
+
+def test_gate_report_side_uses_per_turn_helper():
+    """The enforcement site must ask the event log, not the filesystem."""
+    src = TUI.read_text(encoding="utf-8")
+    assert "_turn_report_written(" in src, "gate does not use the per-turn report helper"

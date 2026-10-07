@@ -11,11 +11,16 @@ are unchanged and pinned by tests/test_session_log_state.py.
 
 from datetime import datetime
 import json
+import time
 import uuid
 from pathlib import Path
 
 import config
 from engine.orchestrator import delegation_depth_ctx
+
+
+def _mint_run_dir() -> str:
+    return f"run_{int(time.time())}"
 
 
 class SessionLogState:
@@ -25,10 +30,22 @@ class SessionLogState:
         self.current_text_by_source = {}
         self.session_id = session_id or str(uuid.uuid4())
         self.turn_start_idx = 0
+        # One workspace run folder per session (defect 2): minted at state
+        # creation, carried in the session file so /resume re-enters the same
+        # folder. from_saved overwrites with the stored value — None means a
+        # pre-fix file, and ensure_run_dir() mints lazily for it.
+        self.run_dir = _mint_run_dir()
 
     @classmethod
     def from_saved(cls, data: dict, sid: str):
-        return cls(events=data.get("ui_events", []), session_id=sid)
+        st = cls(events=data.get("ui_events", []), session_id=sid)
+        st.run_dir = data.get("run_dir")
+        return st
+
+    def ensure_run_dir(self) -> str:
+        if self.run_dir is None:
+            self.run_dir = _mint_run_dir()
+        return self.run_dir
 
     def write_log(self):
         if not config.cfg["settings"].get("enable_session_persistence", False):
@@ -43,7 +60,8 @@ class SessionLogState:
             "timestamp": datetime.now().isoformat(),
             "ui_events": self.events,
             "agent_session": None,
-            "session_id": self.session_id
+            "session_id": self.session_id,
+            "run_dir": self.run_dir
         }
 
         import engine.orchestrator as orchestrator_module
@@ -178,6 +196,14 @@ def current_turn_start() -> int:
 
 def current_session_id() -> str:
     return _session_state.session_id
+
+
+def ensure_run_dir() -> str:
+    return _session_state.ensure_run_dir()
+
+
+def current_run_dir():
+    return _session_state.run_dir
 
 
 def log_prompt(prompt: str):
