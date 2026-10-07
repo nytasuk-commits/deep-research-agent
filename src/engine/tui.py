@@ -43,6 +43,51 @@ def _turn_review_done(events, turn_start_idx):
         for ev in events[turn_start_idx:]
     )
 
+
+def _headless_report_written(name, arguments):
+    """True only when the agent itself wrote final_report.md — a
+    write_workspace_file call targeting it.
+
+    The headless review gate used to arm on ANY function result containing
+    the substring "final_report.md". The Reviewer's own delegate result
+    wrapper ("## Result for Review final_report.md ...") contains that
+    substring, so a REVIEW PASSED round re-armed the gate for a pointless
+    second round; the Orchestrator then repeated the identical Reviewer
+    delegation and tripped the delegate_tasks identical-call loop breaker,
+    force-terminating the turn (session 2f9a47a8, 2026-10-07).
+    """
+    return name == "write_workspace_file" and "final_report.md" in (arguments or "")
+
+
+class _ReportWriteTracker:
+    """Accumulates streamed function-call deltas and answers whether a given
+    call_id was the agent's own write of final_report.md.
+
+    The framework streams a call as content(call_id, name, arguments="")
+    followed by a nameless delta content(call_id=None, arguments=<JSON>) —
+    arming on the call content alone sees only the empty-args snapshot
+    (instrumented headless run, 2026-10-07: argslen=0). Query report_written()
+    from the function_result branch, by which point the args have arrived.
+    """
+
+    def __init__(self):
+        self._names = {}
+        self._args = {}
+        self._last_call_id = None
+
+    def on_call(self, call_id, name, arguments):
+        if call_id:
+            self._last_call_id = call_id
+            self._names[call_id] = name
+            self._args.setdefault(call_id, "")
+        elif self._last_call_id and arguments:
+            self._args[self._last_call_id] += arguments
+
+    def report_written(self, call_id):
+        return _headless_report_written(
+            self._names.get(call_id), self._args.get(call_id, "")
+        )
+
 def _write_log():
     if not config.cfg["settings"].get("enable_session_persistence", False):
         return
@@ -1427,6 +1472,7 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
         enforced_review_check = False
         report_just_written = False
         review_rounds = 0
+        _report_tracker = _ReportWriteTracker()
         _MAX_REVIEW_ROUNDS = config.cfg["settings"].get("max_review_rounds", 2)
 
         while has_requests:
@@ -1450,13 +1496,14 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
                             })
                             if call_id:
                                 sys.stdout.write(f"\n\033[96m[Agent] Calling {name}...\033[0m\n")
+                            _report_tracker.on_call(call_id, name, arguments)
                         elif content.type == "function_result":
                             call_id = getattr(content, "call_id", None)
                             result = getattr(content, "result", "")
                             log_stream_content("Agent", "function_result", {
                                 "call_id": call_id, "result": str(result)
                             })
-                            if review_rounds < _MAX_REVIEW_ROUNDS and "final_report.md" in str(result):
+                            if call_id and _report_tracker.report_written(call_id):
                                 report_just_written = True
                 if getattr(update, "user_input_requests", None):
                     user_input_requests.extend(update.user_input_requests)
