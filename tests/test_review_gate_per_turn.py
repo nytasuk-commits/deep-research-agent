@@ -67,8 +67,7 @@ def test_run_agent_wrapper_records_turn_start_index():
         if isinstance(n, ast.AsyncFunctionDef) and n.name == "run_agent"
     )
     dumped = ast.dump(run_agent)
-    assert "_turn_start_idx" in dumped, "run_agent wrapper does not record the turn-start index"
-    assert "_turn_review_done" in dumped or "_turn_start_idx" in dumped
+    assert "begin_turn" in dumped, "run_agent wrapper does not record the turn-start index"
 
 
 def test_gate_call_site_uses_scanned_scope():

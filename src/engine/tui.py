@@ -6,13 +6,17 @@ from textual.containers import VerticalScroll, Horizontal, Vertical
 from rich.markdown import Markdown
 from engine.orchestrator import create_local_agent, reset_session, delegation_depth_ctx
 import engine.orchestrator as orchestrator_module
+from engine.session_log import (
+    log_prompt, log_stream_content, _write_log,
+    new_session, load_session, begin_turn,
+    current_events, current_turn_start, current_session_id,
+)
 import asyncio
 import json
 import config
 from agent_framework import Message, Content
 from textual import events
 import os
-import uuid
 import re
 import sys
 import argparse
@@ -22,11 +26,6 @@ from tools import tool_quotas_ctx, WORKSPACE_TOOLS, get_workspace_files, get_wor
 
 AGENT_NAME = config.APP_TITLE
 AGENT_DESCRIPTION = config.APP_DESCRIPTION
-
-_session_events = []
-_current_call_by_source = {}
-_current_text_by_source = {}
-_current_session_id = str(uuid.uuid4())
 
 def _turn_review_done(events, turn_start_idx):
     """True if a Reviewer delegation was logged WITHIN the current turn.
@@ -87,125 +86,6 @@ class _ReportWriteTracker:
         return _headless_report_written(
             self._names.get(call_id), self._args.get(call_id, "")
         )
-
-def _write_log():
-    if not config.cfg["settings"].get("enable_session_persistence", False):
-        return
-            
-    log_dir = Path.home() / f".{config.APP_NAME}" / "sessions"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    
-    log_file = log_dir / f"session_{_current_session_id}.json"
-    
-    payload = {
-        "timestamp": datetime.now().isoformat(),
-        "ui_events": _session_events,
-        "agent_session": None,
-        "session_id": _current_session_id
-    }
-    
-    if orchestrator_module._session:
-        try:
-            payload["agent_session"] = orchestrator_module._session.to_dict()
-        except Exception:
-            pass
-            
-    try:
-        with open(log_file, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-    except Exception:
-        pass
-
-def log_prompt(prompt: str):
-    global _session_events, _current_call_by_source, _current_text_by_source
-    _session_events.append({
-        "timestamp": datetime.now().isoformat(),
-        "source": "User",
-        "type": "prompt",
-        "data": {"text": prompt}
-    })
-    _current_call_by_source.clear()
-    _current_text_by_source.clear()
-    _write_log()
-
-def log_stream_content(source: str, content_type: str, raw_data_dict: dict, depth: int = None):
-    global _session_events, _current_call_by_source, _current_text_by_source
-    if depth is None:
-        depth = delegation_depth_ctx.get()
-    
-    if content_type == "text" or content_type == "reasoning":
-        text_val = raw_data_dict.get("text")
-        if not text_val: return
-        _current_call_by_source[source] = None
-        
-        idx = _current_text_by_source.get(source)
-        if idx is not None and idx < len(_session_events) and _session_events[idx]["type"] == content_type:
-            _session_events[idx]["data"]["text"] += text_val
-        else:
-            entry = {
-                "timestamp": datetime.now().isoformat(),
-                "source": source,
-                "type": content_type,
-                "data": {"text": text_val},
-                "depth": depth
-            }
-            _session_events.append(entry)
-            _current_text_by_source[source] = len(_session_events) - 1
-            
-    elif content_type == "function_call":
-        _current_text_by_source[source] = None
-        
-        call_id = raw_data_dict.get("call_id")
-        name = raw_data_dict.get("name")
-        arguments = raw_data_dict.get("arguments", "")
-        
-        if call_id:
-            entry = {
-                "timestamp": datetime.now().isoformat(),
-                "source": source,
-                "type": "function_call",
-                "data": {
-                    "call_id": call_id,
-                    "name": name,
-                    "arguments": arguments
-                },
-                "depth": depth
-            }
-            _session_events.append(entry)
-            _current_call_by_source[source] = len(_session_events) - 1
-        else:
-            idx = _current_call_by_source.get(source)
-            if idx is not None and idx < len(_session_events):
-                if arguments:
-                    _session_events[idx]["data"]["arguments"] += arguments
-            
-    elif content_type == "function_result":
-        _current_text_by_source[source] = None
-        _current_call_by_source[source] = None
-        
-        entry = {
-            "timestamp": datetime.now().isoformat(),
-            "source": source,
-            "type": "function_result",
-            "data": raw_data_dict,
-            "depth": depth
-        }
-        _session_events.append(entry)
-        
-    elif content_type in ("subagent_start", "subagent_end"):
-        _current_text_by_source[source] = None
-        _current_call_by_source[source] = None
-        
-        entry = {
-            "timestamp": datetime.now().isoformat(),
-            "source": source,
-            "type": content_type,
-            "data": raw_data_dict,
-            "depth": depth
-        }
-        _session_events.append(entry)
-        
-    _write_log()
 
 class PromptInput(Input):
     """An Input that maintains command history navigated with Up/Down arrows."""
@@ -514,7 +394,7 @@ class BasicTuiAgent(App):
         workspace_dir = config.cfg.get("settings", {}).get("workspace", {}).get("dir", ".")
         workspace_disp = f"Disk ({workspace_dir})" if workspace_type == "disk" else "In-Memory"
         
-        status_line = f"  [dim]Config Loaded:[/dim] [bright_black]{config_path}[/bright_black]  [dim]Workspace:[/dim] [yellow]{workspace_disp}[/yellow]\n  [dim]Endpoint:[/dim] [cyan]{endpoint}[/cyan]  [dim]Model:[/dim] [cyan]{model}[/cyan]  [dim]Thinking:[/dim] [{thinking_color}]{thinking}[/{thinking_color}]  [dim]Conv Memory:[/dim] [{memory_color}]{memory}[/{memory_color}]\n  [dim]Session ID:[/dim] [bright_black]{_current_session_id}[/bright_black]  [dim]Persistence:[/dim] [{persistence_color}]{persistence_val}[/{persistence_color}]"
+        status_line = f"  [dim]Config Loaded:[/dim] [bright_black]{config_path}[/bright_black]  [dim]Workspace:[/dim] [yellow]{workspace_disp}[/yellow]\n  [dim]Endpoint:[/dim] [cyan]{endpoint}[/cyan]  [dim]Model:[/dim] [cyan]{model}[/cyan]  [dim]Thinking:[/dim] [{thinking_color}]{thinking}[/{thinking_color}]  [dim]Conv Memory:[/dim] [{memory_color}]{memory}[/{memory_color}]\n  [dim]Session ID:[/dim] [bright_black]{current_session_id()}[/bright_black]  [dim]Persistence:[/dim] [{persistence_color}]{persistence_val}[/{persistence_color}]"
         
         auto_approve_warning = "\n\n  [bold red blink]⚠️ AUTO-APPROVE OVERRIDE ACTIVE - ALL INTERACTIVE SAFEGUARDS BYPASSED[/bold red blink]" if getattr(config, 'AUTO_APPROVE', False) else ""
         
@@ -617,11 +497,7 @@ class BasicTuiAgent(App):
             self.workers.cancel_all()
             reset_session()
             
-            global _current_session_id, _session_events, _current_call_by_source, _current_text_by_source
-            _current_session_id = str(uuid.uuid4())
-            _session_events.clear()
-            _current_call_by_source.clear()
-            _current_text_by_source.clear()
+            new_session()
             
             chat = self.query_one("#chat-container", VerticalScroll)
             await chat.remove_children()
@@ -642,7 +518,7 @@ class BasicTuiAgent(App):
             msg = f"**System:**\nSession persistence is now **{state}**."
             if config.cfg["settings"]["enable_session_persistence"]:
                 log_dir = Path.home() / f".{config.APP_NAME}" / "sessions"
-                log_file = log_dir / f"session_{_current_session_id}.json"
+                log_file = log_dir / f"session_{current_session_id()}.json"
                 msg += f"\nSaving to: `{log_file}`"
                 _write_log()
             chat.mount(Static(Markdown(msg), classes="agent-bubble"))
@@ -706,17 +582,13 @@ class BasicTuiAgent(App):
             with open(log_file, "r") as f:
                 data = json.load(f)
             
-            global _session_events, _current_session_id, _current_call_by_source, _current_text_by_source
             ui_events = data.get("ui_events", [])
             state_dict = data.get("agent_session", None)
-            
+
             self._is_agent_running = False
             self.workers.cancel_all()
-            
-            _session_events = ui_events
-            _current_session_id = sid
-            _current_call_by_source.clear()
-            _current_text_by_source.clear()
+
+            load_session(data, sid)
 
             orchestrator_module.reset_session()
             if state_dict:
@@ -956,7 +828,7 @@ class BasicTuiAgent(App):
         # (bugs/tui-module-state-leaks-across-runs.md).
         # Snapshot where this turn starts in the accumulated event list so the
         # review gate can scope its scan to this turn only.
-        self._turn_start_idx = len(_session_events)
+        begin_turn()
         try:
             await self._run_agent_inner(query, show_user_message)
         finally:
@@ -1196,7 +1068,7 @@ class BasicTuiAgent(App):
                     report_exists = "final_report.md" in get_workspace_files()
                 except Exception:
                     report_exists = False
-                review_done = _turn_review_done(_session_events, getattr(self, "_turn_start_idx", 0))
+                review_done = _turn_review_done(current_events(), current_turn_start())
                 if report_exists and not review_done:
                     enforced_review_check = True
                     has_requests = True
@@ -1397,11 +1269,7 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
             with open(log_file, "r") as f:
                 data = json.load(f)
             
-            global _session_events, _current_session_id, _current_call_by_source, _current_text_by_source
-            _session_events = data.get("ui_events", [])
-            _current_session_id = session_id
-            _current_call_by_source.clear()
-            _current_text_by_source.clear()
+            load_session(data, session_id)
             
             orchestrator_module.reset_session()
             session_data = data.get("agent_session", None)
@@ -1449,7 +1317,7 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
     persistence_val = "ON" if config.cfg.get("settings", {}).get("enable_session_persistence", False) else "OFF"
     persistence_color = "32" if persistence_val == "ON" else "31"
     
-    sid = "N/A (Memory disabled)" if not session else _current_session_id
+    sid = "N/A (Memory disabled)" if not session else current_session_id()
     
     auto_approve_warning = "\n  \033[5;31m⚠️ AUTO-APPROVE OVERRIDE ACTIVE - ALL INTERACTIVE SAFEGUARDS BYPASSED\033[0m" if getattr(config, 'AUTO_APPROVE', False) else ""
     
