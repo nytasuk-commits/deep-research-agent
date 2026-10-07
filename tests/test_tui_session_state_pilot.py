@@ -26,7 +26,10 @@ from engine.tui import BasicTuiAgent
 
 @pytest.fixture(autouse=True)
 def _no_persistence(monkeypatch):
-    monkeypatch.setitem(config.cfg["settings"], "enable_session_persistence", False)
+    # Patch the config module session_log actually holds — sys.modules['config']
+    # can be a mock from another test file.
+    from engine import session_log as _sl
+    monkeypatch.setitem(_sl.config.cfg["settings"], "enable_session_persistence", False)
 
 
 @pytest.fixture(autouse=True)

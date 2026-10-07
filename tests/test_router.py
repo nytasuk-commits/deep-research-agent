@@ -46,6 +46,7 @@ config_mock.cfg = {
 }
 
 # Install config mock into sys.modules before importing router
+_real_config = sys.modules.get('config')
 sys.modules['config'] = config_mock
 
 # Now import router (will use the mocked config)
@@ -57,6 +58,11 @@ from src.engine.router import (
     _BACKOFF,
     _MAX_FAILS,
 )
+
+# Restore the real config module: router keeps its own reference to the mock,
+# but later-imported test modules must get the real config, not the mock.
+if _real_config is not None:
+    sys.modules['config'] = _real_config
 
 
 def make_router(urls, cap):

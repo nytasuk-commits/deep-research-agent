@@ -12,7 +12,7 @@
 
 ## Fix direction
 
-Defect 1 fixed as above. Remaining: defect 3 (fold the globals into a per-run state object) and the defect-2 design question (one run folder per session vs per turn). The original "reset both contextvars at run end" direction was wrong for defect 2 — see the reclassification.
+Defect 1 fixed as above. Remaining: the defect-2 design question (one run folder per session vs per turn). The original "reset both contextvars at run end" direction was wrong for defect 2 — see the reclassification.
 
 ## Related
 

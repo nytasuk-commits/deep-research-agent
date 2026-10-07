@@ -21,8 +21,10 @@ from engine.session_log import SessionLogState, new_session, load_session, begin
 @pytest.fixture(autouse=True)
 def _no_persistence(monkeypatch):
     """Never write real session files from unit tests, regardless of the
-    user's config."""
-    monkeypatch.setitem(config.cfg["settings"], "enable_session_persistence", False)
+    user's config. Patch the config module session_log actually holds —
+    sys.modules['config'] can be a mock from another test file."""
+    from engine import session_log as _sl
+    monkeypatch.setitem(_sl.config.cfg["settings"], "enable_session_persistence", False)
 
 
 def test_text_continuation_merges_into_open_entry():
