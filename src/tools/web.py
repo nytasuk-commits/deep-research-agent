@@ -396,6 +396,7 @@ async def fetch_url_to_workspace(url: str, filename: str, convert_to_md: bool = 
         return f"Failed: {e}\n\nTraceback:\n{traceback.format_exc()}"
 
 @tool
+@with_quota
 async def web_search(
     query: str,
     max_results: int = 5,
@@ -413,10 +414,10 @@ async def web_search(
     Returns:
         Formatted search results with titles, URLs, and snippets
     """
-    from tools.core import check_quota, tool_quotas_ctx
-    quota_error = check_quota("web_search")
-    if quota_error:
-        return quota_error
+    # Quota charging, repeat/loop detection and the error wrapper come from
+    # @with_quota (bugs/web-search-skips-quota-wrapper.md); only the ratio
+    # guard below needs the raw context.
+    from tools.core import tool_quotas_ctx
 
     # --- Search-to-fetch ratio guard ---
     # Prevents a task from spending its whole web_calls budget on searches while
