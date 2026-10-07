@@ -28,6 +28,66 @@ _current_call_by_source = {}
 _current_text_by_source = {}
 _current_session_id = str(uuid.uuid4())
 
+def _turn_review_done(events, turn_start_idx):
+    """True if a Reviewer delegation was logged WITHIN the current turn.
+
+    The scan is scoped to events from turn_start_idx onward. Scanning the
+    whole list (the old behaviour) let turn 1's Reviewer satisfy turn 2's
+    mandatory-review gate, so every report after the first in a process
+    shipped unreviewed (bugs/review-gate-skipped-after-first-turn.md).
+    """
+    return any(
+        ev.get("type") == "function_call"
+        and ev.get("data", {}).get("name") == "delegate_tasks"
+        and "Reviewer" in (ev.get("data", {}).get("arguments") or "")
+        for ev in events[turn_start_idx:]
+    )
+
+
+def _headless_report_written(name, arguments):
+    """True only when the agent itself wrote final_report.md — a
+    write_workspace_file call targeting it.
+
+    The headless review gate used to arm on ANY function result containing
+    the substring "final_report.md". The Reviewer's own delegate result
+    wrapper ("## Result for Review final_report.md ...") contains that
+    substring, so a REVIEW PASSED round re-armed the gate for a pointless
+    second round; the Orchestrator then repeated the identical Reviewer
+    delegation and tripped the delegate_tasks identical-call loop breaker,
+    force-terminating the turn (session 2f9a47a8, 2026-10-07).
+    """
+    return name == "write_workspace_file" and "final_report.md" in (arguments or "")
+
+
+class _ReportWriteTracker:
+    """Accumulates streamed function-call deltas and answers whether a given
+    call_id was the agent's own write of final_report.md.
+
+    The framework streams a call as content(call_id, name, arguments="")
+    followed by a nameless delta content(call_id=None, arguments=<JSON>) —
+    arming on the call content alone sees only the empty-args snapshot
+    (instrumented headless run, 2026-10-07: argslen=0). Query report_written()
+    from the function_result branch, by which point the args have arrived.
+    """
+
+    def __init__(self):
+        self._names = {}
+        self._args = {}
+        self._last_call_id = None
+
+    def on_call(self, call_id, name, arguments):
+        if call_id:
+            self._last_call_id = call_id
+            self._names[call_id] = name
+            self._args.setdefault(call_id, "")
+        elif self._last_call_id and arguments:
+            self._args[self._last_call_id] += arguments
+
+    def report_written(self, call_id):
+        return _headless_report_written(
+            self._names.get(call_id), self._args.get(call_id, "")
+        )
+
 def _write_log():
     if not config.cfg["settings"].get("enable_session_persistence", False):
         return
@@ -889,6 +949,21 @@ class BasicTuiAgent(App):
 
     @work(exclusive=True)
     async def run_agent(self, query: str, show_user_message: bool = True):
+        # Wrapper whose finally guarantees review_phase_ctx is cleared at turn
+        # end however the body exits (return, exception, quota-abort break).
+        # The flag is set mid-turn when review is enforced; left set, it
+        # releases the web_calls reserve for every later run in the process
+        # (bugs/tui-module-state-leaks-across-runs.md).
+        # Snapshot where this turn starts in the accumulated event list so the
+        # review gate can scope its scan to this turn only.
+        self._turn_start_idx = len(_session_events)
+        try:
+            await self._run_agent_inner(query, show_user_message)
+        finally:
+            from tools.core import end_review_phase
+            end_review_phase()
+
+    async def _run_agent_inner(self, query: str, show_user_message: bool = True):
         self._is_agent_running = True
         
         # Session directory isolation: when enabled, ALL workspace file operations
@@ -1121,12 +1196,7 @@ class BasicTuiAgent(App):
                     report_exists = "final_report.md" in get_workspace_files()
                 except Exception:
                     report_exists = False
-                review_done = any(
-                    ev.get("type") == "function_call"
-                    and ev.get("data", {}).get("name") == "delegate_tasks"
-                    and "Reviewer" in (ev.get("data", {}).get("arguments") or "")
-                    for ev in _session_events
-                )
+                review_done = _turn_review_done(_session_events, getattr(self, "_turn_start_idx", 0))
                 if report_exists and not review_done:
                     enforced_review_check = True
                     has_requests = True
@@ -1402,6 +1472,7 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
         enforced_review_check = False
         report_just_written = False
         review_rounds = 0
+        _report_tracker = _ReportWriteTracker()
         _MAX_REVIEW_ROUNDS = config.cfg["settings"].get("max_review_rounds", 2)
 
         while has_requests:
@@ -1425,21 +1496,25 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
                             })
                             if call_id:
                                 sys.stdout.write(f"\n\033[96m[Agent] Calling {name}...\033[0m\n")
+                            _report_tracker.on_call(call_id, name, arguments)
                         elif content.type == "function_result":
                             call_id = getattr(content, "call_id", None)
                             result = getattr(content, "result", "")
                             log_stream_content("Agent", "function_result", {
                                 "call_id": call_id, "result": str(result)
                             })
-                            if review_rounds < _MAX_REVIEW_ROUNDS and "final_report.md" in str(result):
+                            if call_id and _report_tracker.report_written(call_id):
                                 report_just_written = True
                 if getattr(update, "user_input_requests", None):
                     user_input_requests.extend(update.user_input_requests)
-            except BaseException as e:
-                if type(e).__name__ == "QuotaAbortException":
-                    sys.stdout.write(f"\n\033[91m[System] Task forcefully aborted: {str(e)}\033[0m\n")
-                    break
-                raise
+            except QuotaAbortException as e:
+                # Catch by type, not by class-name string (the class is
+                # imported above; bugs/quota-abort-exception-inherits-baseexception.md).
+                # QuotaAbortException stays a BaseException subclass on purpose:
+                # agent-framework converts any Exception from a tool into an
+                # error result for the model, which would swallow the abort.
+                sys.stdout.write(f"\n\033[91m[System] Task forcefully aborted: {str(e)}\033[0m\n")
+                break
                     
             if user_input_requests:
                 has_requests = True
@@ -1508,6 +1583,8 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
         sys.stdout.write(f"\n\033[91mError:\033[0m {e}\n")
     finally:
         tool_quotas_ctx.reset(token)
+        from tools.core import end_review_phase
+        end_review_phase()
         if session_token is not None:
             from tools.fs import session_dir_ctx
             session_dir_ctx.reset(session_token)
@@ -1517,7 +1594,21 @@ async def run_cli(builder, prompt: str = None, prompt_file: str = None, session_
         except Exception:
             pass
 
+def _ensure_utf8_streams():
+    """Redirected/piped stdout on Windows defaults to the locale codec (cp1252);
+    the config banner's warning emoji then raises UnicodeEncodeError and kills
+    a headless run before the agent starts (bugs/headless-banner-crash-nonutf8-stdout.md,
+    live crash 2026-10-07). Force UTF-8 and never let one unencodable character
+    abort a long run."""
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def cli_main(builder):
+    _ensure_utf8_streams()
     parser = argparse.ArgumentParser(description="Basic Agent TUI / CLI Scaffold")
     parser.add_argument("--config", "-c", type=str, help="Path to config.yaml", default=None)
     parser.add_argument("--prompt", "-p", type=str, help="Run non-interactively with a specific prompt (headless mode)", default=None)

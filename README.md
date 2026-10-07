@@ -42,18 +42,17 @@ A hierarchical deep research agent built with the **Microsoft Agent Framework** 
 - **Orchestrator**: Plans research, dispatches Searchers, synthesizes `final_report.md`. Has NO web tools and NO file reading tools. Delegates ONLY to the Searcher.
 - **Searcher**: Searches the web, fetches URLs to the workspace. Has NO file reading tools — forced to delegate to the Analyzer. Delegates ONLY to the Analyzer.
 - **Analyzer**: Reads and extracts data from downloaded files. Has NO web tools and NO delegation capability. Leaf node.
-- **Reviewer**: Fact-checks the draft report in a dedicated review phase (Phase 3). Has only `read_workspace_file`, `grep_workspace_file`, and `think_tool` — NO web tools and NO delegation. Leaf node. Returns a numbered list of integrity concerns (or `REVIEW PASSED`); it does not research or rewrite. The Orchestrator owns any corrective research and the final report.
+- **Reviewer**: Fact-checks the draft report in a dedicated review phase (Phase 3). Has only `read_workspace_file`, `grep_workspace_file`, and `think_tool` — NO web tools and NO delegation. Leaf node. Returns a numbered list of integrity concerns (or `REVIEW PASSED`); it does not research or rewrite. The Orchestrator owns the corrections and the final report.
 
 This separation prevents any single agent from bloating its context window with raw web content.
 
 ### Review & Report Finalisation (Phase 3)
 
-After research completes, the Orchestrator writes a draft report and runs a review-and-correct loop before finalising:
+After research completes, the Orchestrator writes `final_report.md` and the TUI enforces a review-and-correct loop before the turn may end (up to `settings.max_review_rounds`, default 2). There is no separate draft artifact — review and correction happen in place on `final_report.md`:
 
-1. **Draft.** The Orchestrator writes `report_draft.md`.
-2. **Review.** It delegates the draft to the Reviewer, which returns integrity concerns (or `REVIEW PASSED`). The Reviewer never researches, rewrites, or calls Searchers.
-3. **Corrective research.** For material, quickly-fixable concerns, the Orchestrator runs a single bounded corrective pass via the Searcher, spending from the reserved budget. Concerns that cannot be quickly resolved stay as honest gaps; data is never invented to satisfy a concern.
-4. **Final report.** The Orchestrator writes `final_report.md` as a fresh file, always — even on a clean `REVIEW PASSED`. `report_draft.md` is left in place, so the draft/final pair gives traceability of exactly what review changed.
+1. **Write.** The Orchestrator writes `final_report.md`.
+2. **Review.** It delegates the report to the Reviewer, which returns integrity concerns (or `REVIEW PASSED`). The Reviewer never researches, rewrites, or calls Searchers.
+3. **Correct.** The Orchestrator fixes every flagged violation by editing the existing `final_report.md` text only, using material already in the workspace. No new research runs during the review stage; a figure that cannot be sourced from existing material is removed or marked unverified, never invented.
 
 ### Proportional Search Depth
 
@@ -194,7 +193,7 @@ python src/app.py --prompt "Compare the AI research strategies of OpenAI, Google
 | `think_tool` | Forced reflection pause for structured reasoning |
 | `delegate_tasks` | Auto-injected for agents with children |
 
-Report artifacts: `report_draft.md` (written after research, before review) and `final_report.md` (written after review and any corrective fixes). Both persist for traceability.
+Report artifact: `final_report.md` (written after research, then reviewed and corrected in place). There is no separate draft artifact — the draft/final split was removed from the design.
 
 ## Security
 

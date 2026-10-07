@@ -2,6 +2,7 @@ import os
 import asyncio
 import re
 import copy
+import json
 from agent_framework.openai import OpenAIChatCompletionClient
 from agent_framework import tool, AgentSession
 from tools import WORKSPACE_TOOLS, tool_quotas_ctx, with_quota, think_tool, QuotaAbortException
@@ -55,6 +56,75 @@ def _safe_format(template: str, **kwargs) -> str:
         def __missing__(self, key):
             return '{' + key + '}'
     return template.format_map(_SafeDict(**kwargs))
+
+# Regexes used to validate a Reviewer's verdict against its output contract.
+# A bullet line is a Markdown list item the verdict is not supposed to use; a
+# tool-leak match means the "verdict" is actually a malformed tool-call block.
+_REVIEWER_BULLET_RE = re.compile(r"^\s*[-*]\s", re.MULTILINE)
+_REVIEWER_TOOL_LEAK_RE = re.compile(
+    r"<function[=\s>/]|<parameter\s*=|<function_call>|</function_call>"
+)
+
+def _reviewer_verdict_issue(final_text: str):
+    """Return a human-readable reason the Reviewer's verdict violates its required
+    output contract (a numbered list, or the verbatim 'REVIEW PASSED' line), or
+    None if it conforms.
+
+    This is a flag, not a rewrite: the actual findings in final_text are passed
+    through to the caller untouched. Surfacing the non-conformance (rather than
+    silently consuming a malformed verdict) is what keeps the review gate from
+    quietly degrading run after run.
+    """
+    text = (final_text or "").strip()
+    if not text:
+        return "returned an empty verdict"
+    if text.startswith("REVIEW PASSED"):
+        return None
+    if re.match(r"^\s*1[\.)\s]", text) and not _REVIEWER_BULLET_RE.search(text):
+        return None
+    if _REVIEWER_TOOL_LEAK_RE.search(text):
+        return "appears to contain a leaked tool-call / think block instead of a clean verdict"
+    if _REVIEWER_BULLET_RE.search(text):
+        return "uses bullets instead of the required numbered list"
+    return "does not start with the required numbered list (or the verbatim REVIEW PASSED line)"
+
+def _coerce_task_list(tasks):
+    """Normalise delegate_tasks input to a list of task dicts.
+
+    The tool-call malformation family (Qwen XML template / LM Studio) can
+    deliver `tasks` as a JSON string; without coercion len() counts
+    characters, iteration yields single characters, and the agent receives
+    a CRITICAL traceback instead of a working call or an actionable error.
+    Returns (tasks_list, None) or (None, error_string).
+
+    The call site in delegate_tasks must stay decorated @tool + @with_quota:
+    a helper once landed between the decorators and the function, silently
+    registering the helper as the tool and stripping the quota wrapper
+    (bugs/done/quota-exhaustion-not-fed-back-to-delegation.md).
+    tests/test_delegate_tasks_coercion.py walks the AST to keep that loud.
+    """
+    if isinstance(tasks, str):
+        try:
+            tasks = json.loads(tasks)
+        except (json.JSONDecodeError, ValueError):
+            return None, (
+                "INVALID delegate_tasks INPUT: 'tasks' was a string that is not valid JSON. "
+                "Pass a list of task dictionaries, each with 'task_name', 'instructions', "
+                "and optionally 'agent_id'."
+            )
+    if isinstance(tasks, dict):
+        tasks = [tasks]
+    if not isinstance(tasks, list):
+        return None, (
+            "INVALID delegate_tasks INPUT: 'tasks' must be a list of task dictionaries "
+            f"(each with 'task_name', 'instructions', optionally 'agent_id'), got {type(tasks).__name__}."
+        )
+    if not all(isinstance(t, dict) for t in tasks):
+        return None, (
+            "INVALID delegate_tasks INPUT: every entry must be a task dictionary with "
+            "'task_name' and 'instructions'; a non-dictionary entry was found."
+        )
+    return tasks, None
 
 def _get_default_options():
     options = {"temperature": 0.0}
@@ -249,7 +319,17 @@ async def create_local_agent(builder, subagent_callback=None, session_data=None,
                     if subagent_callback:
                         await subagent_callback(None, is_subagent=True, agent_name=f"SubAgent_{task_name}", is_done=True)
 
-                    return f"## Result for {task_name}\n{final_text}\n---"
+                    header = f"## Result for {task_name}"
+                    if agent_id == "Reviewer":
+                        issue = _reviewer_verdict_issue(final_text)
+                        if issue:
+                            header += (
+                                "\n⚠ The Reviewer's verdict does not meet the required output contract: "
+                                f"{issue}. The findings below are passed through unchanged; if they do not "
+                                "convey a usable verdict, re-issue the review task asking for a numbered list "
+                                "or the single line 'REVIEW PASSED'."
+                            )
+                    return f"{header}\n{final_text}\n---"
             finally:
                 if quota_token is not None:
                     tool_quotas_ctx.reset(quota_token)
@@ -305,6 +385,9 @@ async def create_local_agent(builder, subagent_callback=None, session_data=None,
     @tool(name="delegate_tasks", description="Delegate multiple independent tasks to specialized sub-agents to be executed concurrently. Pass a list of dictionaries, each with 'task_name', 'instructions', and optionally 'agent_id'.")
     @with_quota
     async def delegate_tasks(tasks: list[dict]) -> str:
+        tasks, coerce_err = _coerce_task_list(tasks)
+        if coerce_err:
+            return coerce_err
         # Step A: Compute per-task web_calls allocation
         _wc = config.cfg.get("settings", {}).get("quotas", {}).get("web_calls", {})
         global_budget = _wc.get("limit", 100) - _wc.get("rules", {}).get("reserve", 0)

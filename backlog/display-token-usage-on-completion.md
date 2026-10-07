@@ -25,7 +25,7 @@ The model responses already carry per-response usage. Session JSON logs show eac
 
 ## Open decisions
 
-- Per-agent breakdown, or run-total only? (Per-agent needs attribution the flat log currently makes hard — see the converged-runtimes/flat-rendering note in CURRENT_ISSUES.md.)
+- Per-agent breakdown, or run-total only? (Per-agent needs attribution the flat log currently makes hard.)
 - Report footer vs TUI vs both.
 - Whether to include cache-read tokens in the headline number or show them separately.
 

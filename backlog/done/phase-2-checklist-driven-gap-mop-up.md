@@ -1,6 +1,6 @@
 # Phase 2 — Checklist-Driven Gap Mop-Up
 
-**Status:** Done — validated
+**Status:** Closed — abandoned. The previous "Done — validated" status was FALSE (corrected 2026-10-06): the task_records/checklist gate is absent from src/ (grep: zero matches). The Phase 2 commits (bbd3d0a, f8ac808, 5de2bb1, 91a4123, a3004d6) were rolled back at 959165e and are listed under "Deliberately NOT re-applying" in backlog/reapply-after-phase-rollback.md. Nothing was validated; the record claimed a feature that does not exist in the codebase.
 **Type:** Implemented Feature
 **Source:** Spec
 
